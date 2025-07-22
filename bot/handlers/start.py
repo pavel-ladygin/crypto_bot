@@ -1,7 +1,9 @@
-from aiogram import types, Dispatcher, Router
-from subscriptions.models import BotUser
+from aiogram import Router, types
 from aiogram.filters import Command
 from asgiref.sync import sync_to_async
+
+from subscriptions.models import BotUser
+
 router = Router()
 
 @router.message(Command("start"))  # С помощью декоратора определяем, что функция # будет принадлежать команде /start
