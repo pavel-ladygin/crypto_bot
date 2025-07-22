@@ -14,7 +14,7 @@ class Coin(models.Model):  # Модель для таблицы монет
     def __str__(self):
         return self.coin_id
 
-
+#модель для подписок на монеты
 class Subscription(models.Model):  # модель для подписок
     user = models.ForeignKey(BotUser, on_delete=models.CASCADE)  # связь с таблицей пользователей
     coin = models.ForeignKey(Coin, on_delete=models.CASCADE)  # связь с таблицей монет
