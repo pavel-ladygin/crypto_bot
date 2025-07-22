@@ -25,3 +25,15 @@ class Subscription(models.Model):  # модель для подписок
 
     def __str__(self):
         return f"{self.user.telegram_id} подписан на {self.coin}"
+
+
+from django.db import models
+
+class CoinSnapshot(models.Model):       # Модель для хранения списка монет
+    name = models.CharField(max_length=100)
+    symbol = models.CharField(max_length=20)
+    price = models.FloatField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.symbol})"

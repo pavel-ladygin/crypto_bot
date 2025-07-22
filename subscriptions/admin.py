@@ -1,5 +1,5 @@
 from django.contrib import admin
-from subscriptions.models import BotUser, Coin, Subscription
+from subscriptions.models import BotUser, Coin, Subscription, CoinSnapshot
 
 @admin.register(Subscription)
 class SubscriptionAdmin(admin.ModelAdmin):
@@ -12,3 +12,7 @@ class CoinAdmin(admin.ModelAdmin):
 @admin.register(BotUser)
 class BotUserAdmin(admin.ModelAdmin):
     list_display = ('telegram_id',)
+
+@admin.register(CoinSnapshot)
+class CoinSnapshotAdmin(admin.ModelAdmin):
+    list_display = ('name', 'symbol', 'price', 'updated_at')
