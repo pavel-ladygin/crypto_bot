@@ -1,5 +1,5 @@
 from aiogram import Router
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from asgiref.sync import sync_to_async
 from subscriptions.models import CoinSnapshot
@@ -12,11 +12,21 @@ async def list_cmd(message: Message):
     # Асинхронно получаем данные из базы данных
     coins = await sync_to_async(list)(CoinSnapshot.objects.all().values('name', 'symbol', 'price', 'updated_at'))
     if not coins:
-        await message.answer("Нет данных о монетах. Данные обновляются каждые 5 минут.")
+        await message.answer("Нет данных о монетах. Данные обновляются каждые 5 минут.") #Обработка исключений
         return
-    text = "Топ 10 монет по капитализации (обновлено: последняя запись):\n\n"
-    for coin in coins:
-        # Преобразуем updated_at в читаемый формат по московскому времени
-        updated_time = datetime.fromisoformat(str(coin['updated_at'].replace(tzinfo=None))).strftime('%H:%M')
-        text += f"{coin['name']} ({coin['symbol']}): ${coin['price']} (обновлено в {updated_time} по UTC+3)\n"
-    await message.answer(text)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[  # Создаем кнопки для вывода монет
+        [InlineKeyboardButton(text=f"{coin['name']} ({coin['symbol']}): ${coin['price']}",callback_data=coin['symbol'])]
+        for coin in coins[:10]  # Берем только 10 монет
+    ] + [
+        [InlineKeyboardButton(text="Назад", callback_data="back")]  # Добавляем кнопку для закрытия меню
+    ])
+    await message.answer("Топ 10 монет по капитализации:\n\nВыберите криптовалюту для подписки:", reply_markup=keyboard)
+
+
+
+
+@router.callback_query(lambda query: query.data == "list")  # Обработчик для кнопки а не команды
+async def list_callback(call_query: CallbackQuery):
+    await list_cmd(call_query.message)
+    await call_query.answer()
