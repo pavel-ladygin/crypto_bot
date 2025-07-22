@@ -1,15 +1,14 @@
 import asyncio
 import os
 import django
+# Подключаем и запускаем джанго
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "core.settings")
+django.setup()
 
-from subscriptions.models import BotUser, Subscription, Coin
 from aiogram import Bot, Dispatcher, Router
 from dotenv import load_dotenv
-from handler import router
+from bot.handler import router
 
-# Подключаем и запускаем джанго
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "bot.settings")
-django.setup()
 
 # Загружаем токен из .env файла
 load_dotenv()
@@ -20,5 +19,6 @@ bot = Bot(token=TG_TOKEN)
 dispatcher = Dispatcher()
 dispatcher.include_router(router) # Роутер содержит все хендлеры, тут они подклчаеются через диспетчер
 
-if __name__ == '__main__':
-    asyncio.run(bot)  # Асинхронный запуск бота
+async def run_bot():
+    await bot.delete_webhook(drop_pending_updates=True)  # удаляем старые обновления
+    await dispatcher.start_polling(bot)
