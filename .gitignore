@@ -4,8 +4,10 @@ venv/
 # Кэш Python
 __pycache__/
 *.py[cod]
-
+celerybeat-schedule.db
 db.sqlite3
+dump.rdb
+
 # Файлы среды
 .env
 

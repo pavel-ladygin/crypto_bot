@@ -12,19 +12,23 @@ async def list_cmd(message: Message):
     # Асинхронно получаем данные из базы данных
     coins = await sync_to_async(list)(CoinSnapshot.objects.all().values('name', 'symbol', 'price', 'updated_at'))
     if not coins:
-        await message.answer("Нет данных о монетах. Данные обновляются каждые 5 минут.")
+        await message.answer("Нет данных о монетах. Данные обновляются каждые 5 минут.") #Обработка исключений
         return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{coin['name']} ({coin['symbol']}): ${coin['price']}", callback_data=f"subscribe_{coin['name']}")]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[  # Создаем кнопки для вывода монет
+        [InlineKeyboardButton(text=f"{coin['name']} ({coin['symbol']}): ${coin['price']}",callback_data=coin['symbol'])]
         for coin in coins[:10]  # Берем только 10 монет
-    ])
-    await message.answer("Топ 10 монет по капитализации (обновлено: последняя запись):\n\nВыберите криптовалюту для подписки:", reply_markup=keyboard)
+    ] + [
+        [InlineKeyboardButton(text="Подписка по поиску", callback_data="subscribe")]  # Добавляем кнопку для закрытия меню
+    ] + [[InlineKeyboardButton(text ="Назад", callback_data="back")
+
+    ]])
+    await message.answer("Топ 10 монет по капитализации:\n\nВыберите криптовалюту для подписки:", reply_markup=keyboard)
 
 
 
 
-@router.callback_query(lambda query: query.data == "list")
+@router.callback_query(lambda query: query.data == "list")  # Обработчик для кнопки а не команды
 async def list_callback(call_query: CallbackQuery):
     await list_cmd(call_query.message)
     await call_query.answer()
