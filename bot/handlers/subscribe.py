@@ -10,7 +10,7 @@ router = Router()
 
 # команды /subscribe активирует ожидание другого сообщения с символом монеты
 @router.message(F.text == "/subscribe")
-async def cmd_subscribe(message: Message, state: FSMContext):
+async def cmd_subscribe(message: Message, state: FSMContext):          # Обрабокта команды
     await message.answer("Введите символ монеты (например: BTC):")
     await state.set_state(SubscribeState.waiting_for_symbol)
 
@@ -38,7 +38,7 @@ async def process_symbol(message: Message, state: FSMContext):
         await state.clear()
 
 
-# Функция для обаботки команды /subscribe, которая подписывает на нужную монету по поиску
+#Функция для обаботки команды /subscribe, которая подписывает на нужную монету по поиску
 @router.message(F.text.startswith("/subscribe"))
 async def subscribe(message: Message):
     args = message.text.split()
@@ -69,8 +69,4 @@ async def subscribe(message: Message):
         await message.answer("❌ Такой монеты не найдено.")
 
 
-# Функция, которая обрабатывает кнопку поиска монеты не из списка и подписки на нее (эта кнопка в /list)
-@router.callback_query(lambda query: query.data == "subscribe")
-async def subscribe_callback(call_query: CallbackQuery):
-    await subscribe(call_query.message)
-    await call_query.answer()
+

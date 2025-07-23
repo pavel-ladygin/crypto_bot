@@ -3,8 +3,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from asgiref.sync import sync_to_async
 from subscriptions.models import CoinSnapshot
-from datetime import datetime
-
+from bot.handlers.subscribe import subscribe
 router = Router()
 
 # Функция для обработки команды /list
@@ -21,7 +20,7 @@ async def list_cmd(message: Message):
         for coin in coins[:10]  # Берем только 10 монет
     ] + [
         [InlineKeyboardButton(text="Подписка по поиску", callback_data="subscribe")]  # Добавляем кнопку для закрытия меню
-    ] + [[InlineKeyboardButton(text ="Назад", callback_data="back")
+    ] + [[InlineKeyboardButton(text ="Назад", callback_data="h0me")
 
     ]])
     await message.answer("Топ 10 монет по капитализации:\n\nВыберите криптовалюту для подписки:", reply_markup=keyboard)
@@ -33,3 +32,9 @@ async def list_cmd(message: Message):
 async def list_callback(call_query: CallbackQuery):
     await list_cmd(call_query.message)
     await call_query.answer()
+
+
+@router.callback_query(lambda query: query.data == "subscribe")                   # Обработка кнопки
+async def inline_subscribe(query: CallbackQuery):
+    await subscribe(query.message)
+    await query.answer()

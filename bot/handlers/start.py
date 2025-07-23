@@ -7,7 +7,7 @@ from subscriptions.models import BotUser
 router = Router()
 
 # Обработка команды /start которая выводит приветственное сообщение
-@router.message(Command("start"))  # С помощью декоратора определяем, что функция # будет принадлежать команде /start
+@router.message(Command("home"))  # С помощью декоратора определяем, что функция # будет принадлежать команде /start
 async def start_hand(message: types.Message):
     user_id = message.from_user.id  # Получаем id пользователя
 
@@ -16,15 +16,15 @@ async def start_hand(message: types.Message):
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🏠 /start", callback_data="start"),
+            InlineKeyboardButton(text="🏠 /home", callback_data="start"),
             InlineKeyboardButton(text="📈 /list", callback_data="list"),
         ],
         [
-            InlineKeyboardButton(text=" /subscribe", callback_data="subscribe"),
-            InlineKeyboardButton(text=" /delete", callback_data="dell"),
+            InlineKeyboardButton(text="✅ /subscribe", callback_data="subscribe"),
+            InlineKeyboardButton(text="📝 /subscriptions", callback_data="subscriptions"),
         ],
         [
-            InlineKeyboardButton(text="⚙️ /settings", callback_data="settings"),
+            InlineKeyboardButton(text="❌ /delete", callback_data="delete"),
             InlineKeyboardButton(text="❓ /faq", callback_data="faq"),
         ],
     ])
@@ -32,20 +32,25 @@ async def start_hand(message: types.Message):
     help_text = (
         "👋 Привет! Я ваш бот для работы с криптовалютами.\n\n"
         "Вот список доступных команд:\n"
-        "/start - начать работу с ботом\n"
-        "/list - список доступных для подписки криптовалют\n"
-        "/subscribe - подписаться на монету, которой нет в списке по поиску\n"
-        "/delete - удалить криптовалюту из рассылки\n"
-        "/settings - настройки бота\n"
-        "/faq - часто задаваемые вопросы\n\n"
+        "🏠 /home - начальная страница бота\n"
+        "📈 /list - список доступных для подписки криптовалют, просто нажмите на нужную вам монету из списка!\n"
+        "✅ /subscribe - подписаться на монету, которой нет в списке по поиску, просто введите название нужной монеты!\n"
+        "📝 /subscriptions - список монет, на которые вы подписались\n"
+        "❌ /delete - удалить криптовалюту из вашей рассылки\n"
+        "❓ /faq - часто задаваемые вопросы\n\n"
         "Выберите команду на кнопках ниже или введите ее вручную."
     )
 
     await message.answer(text=help_text, reply_markup=keyboard)
 
 
-
-@router.callback_query(lambda c: c.data == "start")
+# Функция для перехода домой по кнопке (название h0me, а не home, потому что есть крипта HOME)
+@router.callback_query(lambda c: c.data == "h0me")
 async def process_start_callback(callback_query: CallbackQuery):
     await start_hand(callback_query.message)
     await callback_query.answer()
+
+@router.message(Command("start"))
+async def process_start_callback(message: types.Message):
+    await start_hand(message)
+    await message.answer()

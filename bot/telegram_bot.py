@@ -24,11 +24,11 @@ dispatcher = Dispatcher(storage=storage)
 
 async def set_bot_commands(bot: Bot):
     commands = [
-        BotCommand(command="start", description="Запустить бота"),
+        BotCommand(command="home", description="Домашняя страница"),
         BotCommand(command="list", description="Список топ-10 монет"),
         BotCommand(command="subscribe", description="Подписаться по поиску монеты"),
-        # BotCommand(command="delete", description="Удалить подписку"),
-        # BotCommand(command="settings", description="Настройки бота"),
+        BotCommand(command="subscriptions", description="Список монет, на которые вы подписаны"),
+        BotCommand(command="delete", description="Удалить подписку"),
         # BotCommand(command="faq", description="Часто задаваемые вопросы"),
     ]
     await bot.set_my_commands(commands)
