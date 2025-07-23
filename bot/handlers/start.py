@@ -19,7 +19,7 @@ async def start_hand(message: types.Message):
             InlineKeyboardButton(text="📈 /list", callback_data="list"),
         ],
         [
-            InlineKeyboardButton(text=" /subscriptions", callback_data="sub"),
+            InlineKeyboardButton(text=" /subscribe", callback_data="sub"),
             InlineKeyboardButton(text=" /delete", callback_data="dell"),
         ],
         [
@@ -33,7 +33,7 @@ async def start_hand(message: types.Message):
         "Вот список доступных команд:\n"
         "/start - начать работу с ботом\n"
         "/list - список доступных для подписки криптовалют\n"
-        "/sub - посмотреть список криптовалют на рассылку\n"
+        "/subscribe - подписаться на монету, которой нет в списке по поиску\n"
         "/delete - удалить криптовалюту из рассылки\n"
         "/settings - настройки бота\n"
         "/faq - часто задаваемые вопросы\n\n"

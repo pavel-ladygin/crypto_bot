@@ -5,6 +5,7 @@ from django.db import transaction
 from .models import CoinSnapshot, Subscription
 import requests
 from datetime import datetime
+import time
 
 """
 Для коректной работы всех переодических задач требуется в отдельных терминалах:
@@ -19,6 +20,44 @@ from datetime import datetime
 
 
 # РАБОТАЕТ ЧЕРЕЗ АДМИНКУ
+@shared_task
+def update_all_coin_snapshots():
+    url = "https://api.coingecko.com/api/v3/coins/markets"
+    page = 1
+    per_page = 250
+    all_coins = []
+    while page <5:
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": per_page,
+            "page": page,
+            "sparkline": "false"
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if not data:
+            break
+
+        all_coins.extend(data)
+        page += 1
+        time.sleep(2)
+
+
+        for coin in all_coins:
+            CoinSnapshot.objects.update_or_create(
+                    symbol=coin["symbol"],
+                    defaults={
+                        "name": coin["name"],
+                        "price": coin["current_price"]
+                    }
+                )
+
+        print(f"Загружено и обновлено {len(all_coins)} монет")
+
+
+
 @shared_task
 def update_coin_snapshots():
     url = "https://api.coingecko.com/api/v3/coins/markets"
