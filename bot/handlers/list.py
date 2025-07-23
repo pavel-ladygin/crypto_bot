@@ -7,6 +7,7 @@ from datetime import datetime
 
 router = Router()
 
+# Функция для обработки команды /list
 @router.message(Command(commands=["list"]))
 async def list_cmd(message: Message):
     # Асинхронно получаем данные из базы данных
@@ -27,8 +28,8 @@ async def list_cmd(message: Message):
 
 
 
-
-@router.callback_query(lambda query: query.data == "list")  # Обработчик для кнопки а не команды
+# Обработка кнопки list
+@router.callback_query(lambda query: query.data == "list")
 async def list_callback(call_query: CallbackQuery):
     await list_cmd(call_query.message)
     await call_query.answer()

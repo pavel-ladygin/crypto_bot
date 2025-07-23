@@ -1,13 +1,11 @@
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from asgiref.sync import sync_to_async
-from aiogram.filters import Command, CommandObject
-
 from subscriptions.models import CoinSnapshot, BotUser, Subscription
 
 router = Router()
 
-
+# Функция для обаботки команды /subscribe, которая подписывает на нужную монету по поиску
 @router.message(F.text.startswith("/subscribe"))
 async def subscribe(message: Message):
     args = message.text.split()
@@ -37,6 +35,8 @@ async def subscribe(message: Message):
     except CoinSnapshot.DoesNotExist:
         await message.answer("❌ Такой монеты не найдено.")
 
+
+# Функция, которая обрабатывает кнопку поиска монеты не из списка и подписки на нее (эта кнопка в /list)
 @router.callback_query(lambda query: query.data == "subscribe")
 async def subscribe_callback(call_query: CallbackQuery):
     await subscribe(call_query.message)

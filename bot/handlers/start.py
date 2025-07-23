@@ -6,6 +6,7 @@ from subscriptions.models import BotUser
 
 router = Router()
 
+# Обработка команды /start которая выводит приветственное сообщение
 @router.message(Command("start"))  # С помощью декоратора определяем, что функция # будет принадлежать команде /start
 async def start_hand(message: types.Message):
     user_id = message.from_user.id  # Получаем id пользователя
@@ -19,7 +20,7 @@ async def start_hand(message: types.Message):
             InlineKeyboardButton(text="📈 /list", callback_data="list"),
         ],
         [
-            InlineKeyboardButton(text=" /subscribe", callback_data="sub"),
+            InlineKeyboardButton(text=" /subscribe", callback_data="subscribe"),
             InlineKeyboardButton(text=" /delete", callback_data="dell"),
         ],
         [
