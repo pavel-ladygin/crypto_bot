@@ -17,6 +17,7 @@ class CoinSnapshot(models.Model):       # Модель для хранения �
     def __str__(self):
         return f"{self.name} ({self.symbol})"
 
+
 class Subscription(models.Model):  # модель для подписок
     user = models.ForeignKey(BotUser, on_delete=models.CASCADE)  # связь с таблицей пользователей
     coin = models.ForeignKey(CoinSnapshot, on_delete=models.CASCADE)  # связь с таблицей монет

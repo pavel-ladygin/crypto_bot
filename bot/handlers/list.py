@@ -19,8 +19,10 @@ async def list_cmd(message: Message):
         [InlineKeyboardButton(text=f"{coin['name']} ({coin['symbol']}): ${coin['price']}",callback_data=coin['symbol'])]
         for coin in coins[:10]  # Берем только 10 монет
     ] + [
-        [InlineKeyboardButton(text="Назад", callback_data="back")]  # Добавляем кнопку для закрытия меню
-    ])
+        [InlineKeyboardButton(text="Подписка по поиску", callback_data="subscribe")]  # Добавляем кнопку для закрытия меню
+    ] + [[InlineKeyboardButton(text ="Назад", callback_data="back")
+
+    ]])
     await message.answer("Топ 10 монет по капитализации:\n\nВыберите криптовалюту для подписки:", reply_markup=keyboard)
 
 

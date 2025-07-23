@@ -13,3 +13,4 @@ class BotUserAdmin(admin.ModelAdmin):
 @admin.register(CoinSnapshot)
 class CoinSnapshotAdmin(admin.ModelAdmin):
     list_display = ('name', 'symbol', 'price', 'updated_at')
+
