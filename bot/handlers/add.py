@@ -5,7 +5,7 @@ from bot.handlers.start import start_hand
 router = Router()
 
 from aiogram import Router, types
-from aiogram.filters import Command
+from aiogram.filters import Command, BaseFilter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from asgiref.sync import sync_to_async
 from subscriptions.models import CoinSnapshot, Subscription, BotUser
@@ -14,46 +14,42 @@ from subscriptions.models import CoinSnapshot, Subscription, BotUser
 
 router = Router()
 
-@router.message(Command(commands=["add"]))
-async def add_cmd(message: types.Message):
-    # Асинхронно получаем список монет
-    coins = await sync_to_async(list)(CoinSnapshot.objects.all().values('id', 'name', 'symbol', 'price'))
-    if not coins:
-        await message.answer("Нет доступных монет. Данные обновляются каждые 5 минут.")
-        return
-
-    # Создаём инлайн-клавиатуру с кнопками, используя symbol в callback_data
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{coin['name']} ({coin['symbol']}): ${coin['price']}", callback_data=coin['symbol'])]
-        for coin in coins[:10]  # Берем только 10 монет
-    ])
-
-    await message.answer("Выберите криптовалюту для подписки:", reply_markup=keyboard)
+#Обработчик для кнопки назад
+@router.callback_query(lambda query: query.data == "back")
+async def back_call(query: CallbackQuery):
+    await start_hand(query.message)
+    await query.answer()
 
 
-@router.callback_query()
+
+# Функция для обработки кнопки start
+@router.callback_query(lambda query: query.data == "start")
+async def start_call(query: CallbackQuery):
+    await start_hand(query.message)
+    await query.answer()
+
+
+
+class CoinSymbolFilter(BaseFilter):
+    """
+    Класс - фильтр, который пропускает в callback только Symbol из таблицы с монетами, те только монеты
+    Используется в декораторе @router_callback_query
+    """
+    async def __call__(self, query: CallbackQuery) -> bool:
+        symbol = query.data
+        available_symbols = await sync_to_async(list)(CoinSnapshot.objects.all().values_list("symbol", flat=True))
+        return symbol in available_symbols
+
+
+# Функция для обработки кнопки подписки из списка ТОП-10 монет
+@router.callback_query(CoinSymbolFilter())
 async def process_subscribe_callback(query: CallbackQuery):
     try:
-        # Извлекаем callback_data (данные с кнопки)
-        callback_data = query.data
-
-        # Получаем доступные символы асинхронно
-        available_symbols = await sync_to_async(list)(CoinSnapshot.objects.all().values_list('symbol', flat=True))
-
-        # Обработка кнопки возвращения на домашнюю страницу
-        if callback_data == "back":
-            await start_hand(query.message)
-            await query.answer()
-
-        # Проверяем, является ли symbol допустимым
-        if callback_data not in available_symbols:
-            await query.answer("Недопустимый запрос. Пожалуйста, выберите монету из списка.")
-            return
-
+        symbol = query.data
         user_chat_id = query.from_user.id
 
         # Получаем монету по symbol из БД с топ-10 монет
-        coin = await sync_to_async(CoinSnapshot.objects.get)(symbol=callback_data)
+        coin = await sync_to_async(CoinSnapshot.objects.get)(symbol=symbol)
 
         # Проверяем или создаём пользователя
         bot_user, _ = await sync_to_async(lambda: BotUser.objects.get_or_create(telegram_id=user_chat_id))()
