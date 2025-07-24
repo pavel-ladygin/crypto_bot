@@ -1,40 +1,74 @@
-from aiogram import Router
+from aiogram import Router, F
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from asgiref.sync import sync_to_async
+
 from subscriptions.models import CoinSnapshot
-from bot.handlers.subscribe import subscribe
+from bot.handlers.subscribe import cmd_subscribe
+
 router = Router()
 
-# Функция для обработки команды /list
-@router.message(Command(commands=["list"]))
+@router.message(Command("list"))
 async def list_cmd(message: Message):
-    # Асинхронно получаем данные из базы данных
-    coins = await sync_to_async(list)(CoinSnapshot.objects.all().values('name', 'symbol', 'price', 'updated_at'))
+    @sync_to_async
+    def get_top_coins():
+        return list(CoinSnapshot.objects.order_by("-market_cap")[:10])
+
+    coins = await get_top_coins()
+
     if not coins:
-        await message.answer("Нет данных о монетах. Данные обновляются каждые 5 минут.") #Обработка исключений
+        await message.answer("Нет данных. Дождитесь обновления.")
         return
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[  # Создаем кнопки для вывода монет
-        [InlineKeyboardButton(text=f"{coin['name']} ({coin['symbol']}): ${coin['price']}",callback_data=coin['symbol'])]
-        for coin in coins[:10]  # Берем только 10 монет
-    ] + [
-        [InlineKeyboardButton(text="Подписка по поиску", callback_data="subscribe")]  # Добавляем кнопку для закрытия меню
-    ] + [[InlineKeyboardButton(text ="Назад", callback_data="h0me")
-
-    ]])
-    await message.answer("Топ 10 монет по капитализации:\n\nВыберите криптовалюту для подписки:", reply_markup=keyboard)
-
-
-
-# Обработка кнопки list
-@router.callback_query(lambda query: query.data == "list")
-async def list_callback(call_query: CallbackQuery):
-    await list_cmd(call_query.message)
-    await call_query.answer()
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+                            [InlineKeyboardButton(text=f"{c.name} ({c.symbol.upper()})", callback_data=c.coingecko_id)]
+                            for c in coins
+                        ] + [
+                            [InlineKeyboardButton(text="Следующая страница", callback_data="list2")],
+                            [InlineKeyboardButton(text="Подписка по ID", callback_data="subscribe")],
+                            [InlineKeyboardButton(text="Назад", callback_data="h0me")]
+                        ]
+    )
+    await message.answer("Топ‑10 монет:\n\nВыберите для подписки:", reply_markup=keyboard)
 
 
-@router.callback_query(lambda query: query.data == "subscribe")                   # Обработка кнопки
-async def inline_subscribe(query: CallbackQuery):
-    await subscribe(query.message)
+
+@router.callback_query(lambda c: c.data == "list2")
+async def list_page_2(query):
+    @sync_to_async
+    def get_coins():
+        return list(CoinSnapshot.objects.order_by("-market_cap")[10:20])
+
+    coins = await get_coins()
+
+    if not coins:
+        await query.message.answer("Нет данных.")
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+                            [InlineKeyboardButton(text=f"{c.name} ({c.symbol.upper()})", callback_data=c.coingecko_id)]
+                            for c in coins
+                        ] + [
+                            [InlineKeyboardButton(text="Назад", callback_data="list")],
+                            [InlineKeyboardButton(text="Подписка по ID", callback_data="subscribe")],
+                            [InlineKeyboardButton(text="Главное меню", callback_data="h0me")]
+                        ]
+    )
+
+    await query.message.edit_text("Монеты 11–20 по капитализации:", reply_markup=keyboard)
+
+
+
+@router.callback_query(lambda q: q.data == "list")
+async def list_callback(query: CallbackQuery):
+    await list_cmd(query.message)
+    await query.answer()
+
+
+@router.callback_query(F.data == "subscribe")
+async def inline_subscribe_cb(query: CallbackQuery, state: FSMContext):
+    await cmd_subscribe(query.message, state)
     await query.answer()

@@ -50,7 +50,7 @@ async def process_start_callback(callback_query: CallbackQuery):
     await start_hand(callback_query.message)
     await callback_query.answer()
 
-@router.message(Command("start"))
+@router.message(Command("home"))
 async def process_start_callback(message: types.Message):
     await start_hand(message)
     await message.answer()

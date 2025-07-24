@@ -2,7 +2,7 @@ import logging
 from bot.telegram_bot import TG_TOKEN
 from celery import shared_task
 from django.db import transaction
-from .models import CoinSnapshot, Subscription
+from .models import CoinSnapshot, Subscription, CoinDailyStat
 import requests
 from datetime import datetime
 import time
@@ -26,7 +26,8 @@ def update_all_coin_snapshots():
     page = 1
     per_page = 250
     all_coins = []
-    while page <5:
+
+    while page < 4:
         params = {
             "vs_currency": "usd",
             "order": "market_cap_desc",
@@ -42,19 +43,23 @@ def update_all_coin_snapshots():
 
         all_coins.extend(data)
         page += 1
-        time.sleep(2)
+        time.sleep(5)
 
+    updated_count = 0
 
-        for coin in all_coins:
-            CoinSnapshot.objects.update_or_create(
-                    symbol=coin["symbol"],
-                    defaults={
-                        "name": coin["name"],
-                        "price": coin["current_price"]
-                    }
-                )
+    for coin in all_coins:
+        CoinSnapshot.objects.update_or_create(
+            coingecko_id=coin["id"],
+            defaults={
+                "name": coin["name"],
+                "symbol": coin["symbol"],
+                "price": coin["current_price"],
+                "market_cap": coin.get("market_cap")  # добавлено
+            }
+        )
+        updated_count += 1
 
-        print(f"Загружено и обновлено {len(all_coins)} монет")
+    print(f"✅ Загружено и обновлено {updated_count} монет по coingecko_id")
 
 
 
@@ -76,10 +81,12 @@ def update_coin_snapshots():
         with transaction.atomic():
             for coin in coins_data:
                 CoinSnapshot.objects.update_or_create(
-                    symbol=coin["symbol"],
+                    coingecko_id=coin["id"],
                     defaults={
                         "name": coin["name"],
-                        "price": coin["current_price"]
+                        "symbol": coin["symbol"],
+                        "price": coin["current_price"],
+                        "market_cap": coin.get("market_cap")  # добавлено
                     }
                 )
 
@@ -126,3 +133,60 @@ def send_price_updates():
                 print(f"[Telegram] Не удалось отправить сообщение {user_id}: {response.text}")
         except Exception as e:
             print(f"[Celery] Ошибка при отправке сообщения пользователю {user_id}: {e}")
+
+
+@shared_task
+def fetch_daily_coin_stats_from_30_day():
+    coins = CoinSnapshot.objects.all()
+    for coin in coins:
+        try:
+            url = f"https://api.coingecko.com/api/v3/coins/{coin.coingecko_id}/market_chart"
+            params = {
+                "vs_currency": "usd",
+                "days": 30,
+                "interval": "daily"
+            }
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+
+            prices = data.get("prices", [])
+            market_caps = data.get("market_caps", [])
+            volumes = data.get("total_volumes", [])
+
+            for i in range(len(prices)):
+                timestamp = prices[i][0] / 1000
+                date = datetime.utcfromtimestamp(timestamp).date()
+
+                price = prices[i][1]
+                market_cap = market_caps[i][1] if i < len(market_caps) else None
+                volume = volumes[i][1] if i < len(volumes) else None
+
+                # Изменение капитализации
+                prev_market_cap = market_caps[i - 1][1] if i > 0 and i - 1 < len(market_caps) else None
+                market_cap_change = market_cap - prev_market_cap if market_cap and prev_market_cap else None
+
+                # Изменение цены в %
+                prev_price = prices[i - 1][1] if i > 0 and i - 1 < len(prices) else None
+                price_change_percent = None
+                if prev_price and prev_price > 0:
+                    price_change_percent = ((price - prev_price) / prev_price) * 100
+
+                CoinDailyStat.objects.update_or_create(
+                    coin=coin,
+                    date=date,
+                    defaults={
+                        "price": price,
+                        "market_cap": market_cap,
+                        "market_cap_change": market_cap_change,
+                        "volume": volume,
+                        "price_change_percent": price_change_percent
+                    }
+                )
+
+            print(f"✅ {coin.symbol.upper()} обновлен")
+
+            time.sleep(1.5)  # защита от rate limit'а
+
+        except Exception as e:
+            print(f"❌ Ошибка для {coin.coingecko_id}: {e}")
