@@ -1,59 +1,62 @@
-from aiogram import Router, types
+from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from asgiref.sync import sync_to_async
+
 from subscriptions.models import CoinSnapshot, Subscription, BotUser
 
 router = Router()
 
-@router.message(Command(commands=["delete"]))
-async def del_cmd(message: types.Message):
-    user_chat_id = message.from_user.id
-
-    # Получаем пользователя и все его подписки
+async def show_delete_keyboard(user_id: int, send_func):
     try:
-        user = await sync_to_async(BotUser.objects.get)(telegram_id=user_chat_id)
+        user = await sync_to_async(BotUser.objects.get)(telegram_id=user_id)
     except BotUser.DoesNotExist:
-        await message.answer("Вы ещё не подписаны ни на одну монету.")
+        await send_func("❗ У вас нет подписок.")
         return
 
-    subscriptions = await sync_to_async(list)(Subscription.objects.filter(user=user).select_related("coin"))
-
-    if not subscriptions:
-        await message.answer("У вас нет активных подписок.")
+    subs = await sync_to_async(list)(
+        Subscription.objects.filter(user=user).select_related("coin")
+    )
+    if not subs:
+        await send_func("ℹ️ У вас нет подписок.")
         return
 
-    # Создаем клавиатуру с монетами, на которые пользователь подписан
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"{sub.coin.name} ({sub.coin.symbol})",
-            callback_data=f"del:{sub.coin.symbol}"
-        )] for sub in subscriptions
-    ])
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"❌ {s.coin.name} ({s.coin.symbol.upper()})",
+                    callback_data=f"del:{s.coin.coingecko_id}"
+                )
+            ]
+            for s in subs
+        ] + [
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="h0me")]
+        ]
+    )
+    await send_func("Выберите монету для удаления подписки:", reply_markup=keyboard)
 
-    await message.answer("Выберите монету, от которой хотите отписаться:", reply_markup=keyboard)
+@router.message(Command("delete"))
+async def delete_cmd(message: Message):
+    await show_delete_keyboard(message.from_user.id, message.answer)
 
+@router.callback_query(F.data == "delete")
+async def delete_button_cb(query: CallbackQuery):
+    await show_delete_keyboard(query.from_user.id, query.message.answer)
+    await query.answer()
 
-@router.callback_query()
+@router.callback_query(F.data.startswith("del:"))
 async def process_delete_callback(query: CallbackQuery):
-    data = query.data
-    if not data.startswith("del:"):
-        return  # Не обрабатываем, если это не наша кнопка
-
-    symbol = data.split(":")[1]
-    user_chat_id = query.from_user.id
+    coin_id = query.data.split(":",1)[1]
+    user_id = query.from_user.id
 
     try:
-        user = await sync_to_async(BotUser.objects.get)(telegram_id=user_chat_id)
-        coin = await sync_to_async(CoinSnapshot.objects.get)(symbol=symbol)
-        subscription = await sync_to_async(Subscription.objects.get)(user=user, coin=coin)
-
-        await sync_to_async(subscription.delete)()
-
-        await query.message.answer(f"Вы отписались от {coin.name} ({coin.symbol}).")
-        await query.answer()
-
+        user = await sync_to_async(BotUser.objects.get)(telegram_id=user_id)
+        coin = await sync_to_async(CoinSnapshot.objects.get)(coingecko_id=coin_id)
+        sub = await sync_to_async(Subscription.objects.get)(user=user, coin=coin)
+        await sync_to_async(sub.delete)()
+        await query.message.answer(f"✅ Подписка на {coin.name} удалена.")
     except Subscription.DoesNotExist:
-        await query.answer("Подписка не найдена.", show_alert=True)
-    except Exception as e:
-        await query.answer(f"Ошибка при удалении подписки: {str(e)}", show_alert=True)
+        await query.answer("⚠️ Подписка не найдена.", show_alert=True)
+    finally:
+        await query.answer()
