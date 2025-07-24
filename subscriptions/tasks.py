@@ -186,7 +186,7 @@ def fetch_daily_coin_stats_from_30_day():
 
             print(f"✅ {coin.symbol.upper()} обновлен")
 
-            time.sleep(1.5)  # защита от rate limit'а
+            time.sleep(60)  # защита от rate limit'а
 
         except Exception as e:
             print(f"❌ Ошибка для {coin.coingecko_id}: {e}")
