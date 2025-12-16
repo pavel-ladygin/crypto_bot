@@ -47,3 +47,49 @@ class Subscription(models.Model):  # модель для подписок
 
     def __str__(self):
         return f"{self.user.telegram_id} подписан на {self.coin}"
+    
+
+
+class NewsArticle(models.Model):
+    coin = models.ForeignKey(CoinSnapshot, on_delete=models.CASCADE, related_name='news')
+    title = models.TextField()
+    description = models.TextField(blank=True, null=True)
+    url = models.URLField(unique=True)
+    source = models.CharField(max_length=200)
+    published_at = models.DateTimeField()
+    collected_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-published_at']
+        
+    def __str__(self):
+        return f"{self.coin.symbol.upper()} - {self.title[:50]}"
+
+
+class NewsSentiment(models.Model):
+    article = models.OneToOneField(NewsArticle, on_delete=models.CASCADE)
+    sentiment_score = models.FloatField()  # -1 до +1
+    sentiment_label = models.CharField(max_length=20)  # positive/neutral/negative
+    confidence = models.FloatField(default=0.0)
+    analyzed_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"{self.article.coin.symbol} - {self.sentiment_label} ({self.sentiment_score:.2f})"
+
+
+class PriceEvent(models.Model):
+    coin = models.ForeignKey(CoinSnapshot, on_delete=models.CASCADE, related_name='events')
+    date = models.DateField()
+    event_type = models.CharField(max_length=20)  # spike/crash
+    price_change_percent = models.FloatField()
+    price_before = models.DecimalField(max_digits=20, decimal_places=8)
+    price_after = models.DecimalField(max_digits=20, decimal_places=8)
+    is_anomaly = models.BooleanField(default=False)
+    news_count = models.IntegerField(default=0)
+    
+    class Meta:
+        ordering = ['-date']
+        unique_together = ['coin', 'date']
+        
+    def __str__(self):
+        return f"{self.coin.symbol} - {self.date} ({self.price_change_percent:+.2f}%)"
