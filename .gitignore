@@ -17,3 +17,17 @@ dump.rdb
 *.pyc
 *.pyo
 *.swp
+
+.Python
+env/
+venv/
+.venv
+*.sqlite3
+*.db
+.git
+.gitignore
+.idea
+.vscode
+*.log
+*.pot
+db.sqlite3
