@@ -21,7 +21,7 @@ class CoinDailyStatAdmin(admin.ModelAdmin):
 
 @admin.register(NewsArticle)
 class NewsArticleAdmin(admin.ModelAdmin):
-    list_display = ('coin', 'title', 'source', 'published_at')
+    list_display = ('coin', 'title', 'source', 'published_at', 'news_type')
     list_filter = ('coin', 'source', 'published_at')
     search_fields = ('title', 'description')
 

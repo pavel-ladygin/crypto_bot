@@ -51,19 +51,35 @@ class Subscription(models.Model):  # модель для подписок
 
 
 class NewsArticle(models.Model):
-    coin = models.ForeignKey(CoinSnapshot, on_delete=models.CASCADE, related_name='news')
-    title = models.TextField()
+    NEWS_TYPE_CHOICES = [
+        ('financial', 'Financial'),
+        ('political', 'Political'),
+        ('market', 'Market General'),
+        ('technical', 'Technical Analysis'),
+    ]
+    
+    coin = models.ForeignKey(CoinSnapshot, on_delete=models.CASCADE)
+    title = models.CharField(max_length=500)
     description = models.TextField(blank=True, null=True)
-    url = models.URLField(unique=True)
+    url = models.URLField(unique=True, max_length=500)
     source = models.CharField(max_length=200)
     published_at = models.DateTimeField()
-    collected_at = models.DateTimeField(auto_now_add=True)
+    
+    # НОВОЕ ПОЛЕ
+    news_type = models.CharField(
+        max_length=20, 
+        choices=NEWS_TYPE_CHOICES, 
+        default='financial'
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.coin.symbol.upper()} - {self.title[:50]}"
     
     class Meta:
         ordering = ['-published_at']
-        
-    def __str__(self):
-        return f"{self.coin.symbol.upper()} - {self.title[:50]}"
+
 
 
 class NewsSentiment(models.Model):
