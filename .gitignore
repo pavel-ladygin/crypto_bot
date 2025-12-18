@@ -17,7 +17,8 @@ dump.rdb
 *.pyc
 *.pyo
 *.swp
-
+.csv
+ml/data/combined_dataset.csv
 .Python
 env/
 venv/

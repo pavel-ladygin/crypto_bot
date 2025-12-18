@@ -16,6 +16,15 @@ import time
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+from pathlib import Path
+from celery import shared_task
+from django.utils import timezone
+
+# Глобальный кэш модели
+_custom_model = None
+_custom_tokenizer = None
 
 import numpy as np
 import pandas as pd
@@ -255,6 +264,89 @@ def collect_historical_news(days=30):
 # ============================================
 # 2. АНАЛИЗ ТОНАЛЬНОСТИ (FinBERT)
 # ============================================
+def load_custom_sentiment_model():
+    """Загрузка вашей обученной модели (81% accuracy)"""
+    global _custom_model, _custom_tokenizer
+    
+    if _custom_model is None:
+        model_path = Path('ml/models/crypto_sentiment')
+        
+        if not model_path.exists():
+            raise FileNotFoundError(f"Модель не найдена: {model_path}")
+        
+        print("🔧 Загружаю custom модель (accuracy: 81.23%)...")
+        _custom_tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+        _custom_model = AutoModelForSequenceClassification.from_pretrained(str(model_path))
+        _custom_model.eval()
+        print("✅ Модель загружена")
+    
+    return _custom_model, _custom_tokenizer
+
+
+# subscriptions/tasks.py
+# subscriptions/tasks.py
+# subscriptions/tasks.py
+
+def analyze_sentiment_with_custom_model():
+    """Анализ с Custom моделью - сохраняет в ОТДЕЛЬНУЮ таблицу"""
+    from subscriptions.models import NewsArticle, CustomModelSentiment
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    import torch
+    from pathlib import Path
+    
+    print(f"🔧 Загружаю custom модель...")
+    
+    model_path = Path('ml/models/crypto_sentiment')
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path))
+    model = AutoModelForSequenceClassification.from_pretrained(str(model_path))
+    model.eval()
+    
+    print("✅ Модель загружена")
+    
+    news = NewsArticle.objects.all()[:1117]
+    
+    analyzed = 0
+    errors = 0
+    
+    for article in news:
+        try:
+            text = f"{article.title}. {article.description or ''}"
+            
+            inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=128)
+            
+            with torch.no_grad():
+                outputs = model(**inputs)
+                probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+            
+            labels = ['negative', 'neutral', 'positive']
+            predicted_idx = probs.argmax().item()
+            predicted_label = labels[predicted_idx]
+            confidence = probs[0][predicted_idx].item()
+            sentiment_score = (predicted_idx - 1) * confidence
+            
+            # Сохраняем в НОВУЮ таблицу CustomModelSentiment
+            sentiment, created = CustomModelSentiment.objects.update_or_create(
+                article=article,
+                model_version='custom_distilbert_v1',
+                defaults={
+                    'sentiment_label': predicted_label,
+                    'sentiment_score': sentiment_score,
+                    'confidence': confidence,
+                }
+            )
+            
+            emoji = {'negative': '🔴', 'neutral': '⚪', 'positive': '🟢'}
+            print(f"{emoji[predicted_label]} {article.coin.symbol}: {predicted_label} ({confidence:.1%})")
+            
+            analyzed += 1
+            
+        except Exception as e:
+            print(f"❌ Ошибка {article.id}: {e}")
+            errors += 1
+    
+    return {'analyzed': analyzed, 'errors': errors}
+
+
 
 def analyze_with_finbert(text):
     """

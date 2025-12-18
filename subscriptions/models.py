@@ -1,11 +1,67 @@
 from django.db import models
 
-class BotUser(models.Model):  # Модель для таблицы с пользователями по tg-id
-    telegram_id = models.BigIntegerField(unique=True)
+# subscriptions/models.py
 
-    def __str__(self):  # Магический метод, для нормального представления объекта
-                        # (например при print(user1) его tg-id корректно отобразиться
-        return str(self.telegram_id)
+from django.db import models
+from django.utils import timezone
+
+class BotUser(models.Model):
+    telegram_id = models.BigIntegerField(unique=True, verbose_name="Telegram ID")
+    
+    # Основная информация
+    username = models.CharField(max_length=255, null=True, blank=True, verbose_name="Username")
+    first_name = models.CharField(max_length=255, null=True, blank=True, verbose_name="Имя")
+    last_name = models.CharField(max_length=255, null=True, blank=True, verbose_name="Фамилия")
+    language_code = models.CharField(max_length=10, null=True, blank=True, verbose_name="Язык")
+    
+    # Статистика активности
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Дата регистрации")
+    last_active = models.DateTimeField(auto_now=True, verbose_name="Последняя активность")
+    total_commands = models.IntegerField(default=0, verbose_name="Всего команд")
+    total_predictions_viewed = models.IntegerField(default=0, verbose_name="Просмотров прогнозов")
+    
+    # Статус
+    is_active = models.BooleanField(default=True, verbose_name="Активен")
+    is_blocked = models.BooleanField(default=False, verbose_name="Заблокирован")
+    
+    class Meta:
+        verbose_name = "Пользователь бота"
+        verbose_name_plural = "Пользователи бота"
+        ordering = ['-last_active']
+    
+    def __str__(self):
+        if self.username:
+            return f"@{self.username} ({self.telegram_id})"
+        elif self.first_name:
+            return f"{self.first_name} ({self.telegram_id})"
+        return f"User {self.telegram_id}"
+    
+    @property
+    def full_name(self):
+        """Полное имя пользователя"""
+        if self.first_name and self.last_name:
+            return f"{self.first_name} {self.last_name}"
+        elif self.first_name:
+            return self.first_name
+        elif self.username:
+            return f"@{self.username}"
+        return f"User {self.telegram_id}"
+    
+    @property
+    def subscription_count(self):
+        """Количество подписок"""
+        return self.subscription_set.count()
+    
+    @property
+    def days_since_registration(self):
+        """Дней с момента регистрации"""
+        return (timezone.now() - self.created_at).days
+    
+    @property
+    def is_new_user(self):
+        """Новый пользователь (меньше 7 дней)"""
+        return self.days_since_registration < 7
+
 
 
 class CoinSnapshot(models.Model):
@@ -82,15 +138,41 @@ class NewsArticle(models.Model):
 
 
 
+# subscriptions/models.py
 class NewsSentiment(models.Model):
+    """Основная таблица - FinBERT"""
     article = models.OneToOneField(NewsArticle, on_delete=models.CASCADE)
-    sentiment_score = models.FloatField()  # -1 до +1
-    sentiment_label = models.CharField(max_length=20)  # positive/neutral/negative
+    sentiment_label = models.CharField(max_length=50)
+    sentiment_score = models.FloatField()
     confidence = models.FloatField(default=0.0)
     analyzed_at = models.DateTimeField(auto_now_add=True)
     
+    class Meta:
+        verbose_name = "FinBERT Sentiment"
+        verbose_name_plural = "FinBERT Sentiments"
+    
     def __str__(self):
-        return f"{self.article.coin.symbol} - {self.sentiment_label} ({self.sentiment_score:.2f})"
+        return f"{self.article.coin.symbol} - {self.sentiment_label}"
+
+
+class CustomModelSentiment(models.Model):
+    """Новая таблица - Custom DistilBERT для A/B тестирования"""
+    article = models.ForeignKey(NewsArticle, on_delete=models.CASCADE, related_name='custom_sentiments')
+    sentiment_label = models.CharField(max_length=50)
+    sentiment_score = models.FloatField()
+    confidence = models.FloatField(default=0.0)
+    model_version = models.CharField(max_length=50, default='custom_distilbert_v1')
+    analyzed_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name = "Custom Model Sentiment"
+        verbose_name_plural = "Custom Model Sentiments"
+        # Можно анализировать одну новость несколько раз разными версиями
+        unique_together = ['article', 'model_version']
+    
+    def __str__(self):
+        return f"{self.article.coin.symbol} - {self.sentiment_label} ({self.model_version})"
+
 
 
 class PriceEvent(models.Model):

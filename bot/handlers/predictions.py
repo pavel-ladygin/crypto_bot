@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from asgiref.sync import sync_to_async
 from datetime import date
 
-from subscriptions.models import DirectionPrediction, CoinSnapshot
+from subscriptions.models import DirectionPrediction, CoinSnapshot, BotUser
 
 router = Router()
 
@@ -150,6 +150,21 @@ async def show_prediction_detail(query: CallbackQuery):
     Показывает детальный прогноз для выбранной монеты с актуальной ценой
     """
     coin_symbol = query.data.replace("pred_", "")
+    user_id = query.from_user.id
+        
+    @sync_to_async
+    def increment_prediction_views():
+        """Увеличиваем счетчик просмотров прогнозов"""
+        try:
+            user = BotUser.objects.get(telegram_id=user_id)
+            user.total_predictions_viewed += 1
+            user.save()
+        except BotUser.DoesNotExist:
+            pass
+    
+    await increment_prediction_views()
+
+
     
     @sync_to_async
     def get_prediction_detail(symbol):

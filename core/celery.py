@@ -52,6 +52,11 @@ app.conf.beat_schedule = {
         'task': 'subscriptions.tasks.send_daily_predictions_to_users',
         'schedule': crontab(hour=7, minute=0),
     },
+
+    'custom-sentiment-analysis': {
+        'task': 'subscriptions.tasks.analyze_sentiment_with_custom_model',
+        'schedule': crontab(minute=0, hour='*/2'),  # Каждые 2 часа
+    },
 }
 
 app.conf.timezone = 'UTC'
