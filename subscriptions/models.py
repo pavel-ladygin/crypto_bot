@@ -109,3 +109,106 @@ class PriceEvent(models.Model):
         
     def __str__(self):
         return f"{self.coin.symbol} - {self.date} ({self.price_change_percent:+.2f}%)"
+    
+
+# subscriptions/models.py
+
+class PricePrediction(models.Model):
+    """Прогнозы изменения цен"""
+    coin = models.ForeignKey(CoinSnapshot, on_delete=models.CASCADE, related_name='predictions')
+    
+    # Когда сделан прогноз
+    created_at = models.DateTimeField(auto_now_add=True)
+    prediction_date = models.DateField()  # Дата, на которую делается прогноз
+    
+    # Прогнозируемые значения
+    predicted_change_percent = models.FloatField(
+        help_text="Предсказанное изменение цены в %"
+    )
+    predicted_price = models.DecimalField(
+        max_digits=20, 
+        decimal_places=8,
+        help_text="Предсказанная цена"
+    )
+    
+    # Контекст прогноза
+    current_price = models.DecimalField(
+        max_digits=20, 
+        decimal_places=8,
+        help_text="Цена на момент прогноза"
+    )
+    
+    # Метаданные модели
+    model_version = models.CharField(max_length=50, default='1.0')
+    confidence_score = models.FloatField(null=True, blank=True)
+    
+    class Meta:
+        ordering = ['-prediction_date']
+        unique_together = ['coin', 'prediction_date']
+        indexes = [
+            models.Index(fields=['coin', '-prediction_date']),
+        ]
+    
+    def __str__(self):
+        return f"{self.coin.symbol} на {self.prediction_date}: {self.predicted_change_percent:+.2f}%"
+
+
+# subscriptions/models.py
+
+# Добавляем новую модель для прогнозов направления
+class DirectionPrediction(models.Model):
+    """Прогнозы направления движения цены (UP/DOWN)"""
+    
+    DIRECTION_CHOICES = [
+        ('UP', 'Upward'),
+        ('DOWN', 'Downward'),
+    ]
+    
+    coin = models.ForeignKey(CoinSnapshot, on_delete=models.CASCADE, related_name='direction_predictions')
+    prediction_date = models.DateField(help_text="Дата, на которую делается прогноз")
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    # Прогноз направления
+    predicted_direction = models.CharField(max_length=4, choices=DIRECTION_CHOICES)
+    confidence_score = models.FloatField(help_text="Уверенность модели (0-1)")
+    
+    # Вероятности
+    probability_up = models.FloatField(help_text="Вероятность роста")
+    probability_down = models.FloatField(help_text="Вероятность падения")
+    
+    # Оценочное изменение цены
+    estimated_change_percent = models.FloatField(
+        help_text="Оценка изменения в % (положительное = рост)"
+    )
+    
+    # Контекст прогноза
+    current_price = models.DecimalField(max_digits=20, decimal_places=8)
+    estimated_price = models.DecimalField(
+        max_digits=20, 
+        decimal_places=8,
+        help_text="Оценочная цена на основе направления"
+    )
+    
+    # Метаданные
+    model_version = models.CharField(max_length=50, default='classifier_v2')
+    
+    class Meta:
+        ordering = ['-prediction_date', '-confidence_score']
+        unique_together = ['coin', 'prediction_date']
+        indexes = [
+            models.Index(fields=['coin', '-prediction_date']),
+            models.Index(fields=['predicted_direction']),
+        ]
+    
+    def __str__(self):
+        return f"{self.coin.symbol} on {self.prediction_date}: {self.predicted_direction} ({self.confidence_score*100:.0f}%)"
+    
+    @property
+    def signal_strength(self):
+        """Возвращает силу сигнала"""
+        if self.confidence_score >= 0.7:
+            return 'strong'
+        elif self.confidence_score >= 0.6:
+            return 'moderate'
+        else:
+            return 'weak'

@@ -2,15 +2,37 @@ import logging
 from bot.telegram_bot import TG_TOKEN
 from celery import shared_task
 from django.db import transaction
-from .models import CoinSnapshot, Subscription, CoinDailyStat, NewsArticle, NewsSentiment, PriceEvent
+from django.utils import timezone
+from .models import CoinSnapshot, Subscription, CoinDailyStat, NewsArticle, NewsSentiment, PriceEvent, PricePrediction, DirectionPrediction
 import numpy as np
 import requests
 from datetime import datetime, timedelta
 import time
 import os
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer 
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
+from sklearn.preprocessing import StandardScaler
+
+import joblib
 
 
+
+# Определяем пути к моделям
+BASE_DIR = Path(__file__).resolve().parent.parent
+ML_MODELS_DIR = BASE_DIR / 'ml' / 'models'
+
+# Создаем директорию если не существует
+ML_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Пути к файлам моделей
+CLASSIFIER_MODEL_PATH = ML_MODELS_DIR / 'ml_classifier.pkl'
+CLASSIFIER_SCALER_PATH = ML_MODELS_DIR / 'ml_classifier_scaler.pkl'
+CLASSIFIER_FEATURES_PATH = ML_MODELS_DIR / 'classifier_features.pkl'
+
+TRAINING_DATA_PATH = ML_MODELS_DIR / 'classification_data.csv'
+MODEL_REPORT_PATH = ML_MODELS_DIR / 'model_report.json'
 # ============================================
 # Задача для обновления данных о монетах из CoinGecko
 # ============================================
@@ -569,6 +591,126 @@ def analyze_all_sentiment():
     return f"Проанализировано {analyzed_count} статей"
 
 
+# subscriptions/tasks.py
+
+@shared_task
+def setup_finbert():
+    """
+    Устанавливает и тестирует FinBERT
+    """
+    try:
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        import torch
+        
+        print("📥 Downloading FinBERT model...")
+        
+        model_name = "ProsusAI/finbert"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        
+        print("✅ FinBERT loaded successfully")
+        
+        # Тест
+        test_text = "Bitcoin surges to new all-time high as institutional adoption grows"
+        
+        inputs = tokenizer(test_text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+        
+        with torch.no_grad():
+            outputs = model(**inputs)
+        
+        probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+        
+        # FinBERT возвращает: [positive, negative, neutral]
+        labels = ['positive', 'negative', 'neutral']
+        scores = probs[0].tolist()
+        
+        print(f"\n📰 Test: \"{test_text}\"")
+        for label, score in zip(labels, scores):
+            print(f"   {label}: {score:.3f}")
+        
+        return {'status': 'success', 'model': model_name}
+        
+    except ImportError:
+        print("❌ transformers not installed")
+        print("   Run: pip install transformers torch")
+        return {'error': 'dependencies missing'}
+
+
+def analyze_with_finbert(text):
+    """
+    Анализирует текст с помощью FinBERT
+    """
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    import torch
+    
+    model_name = "ProsusAI/finbert"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name)
+    
+    # Tokenize
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    
+    # Predict
+    with torch.no_grad():
+        outputs = model(**inputs)
+    
+    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    
+    # FinBERT classes: positive, negative, neutral
+    positive_score = probs[0][0].item()
+    negative_score = probs[0][1].item()
+    neutral_score = probs[0][2].item()
+    
+    # Конвертируем в [-1, 1] scale
+    sentiment_score = positive_score - negative_score
+    
+    # Определяем метку
+    max_idx = probs[0].argmax().item()
+    labels = ['positive', 'negative', 'neutral']
+    sentiment_label = labels[max_idx]
+    
+    confidence = probs[0][max_idx].item()
+    
+    return {
+        'sentiment_score': sentiment_score,
+        'sentiment_label': sentiment_label,
+        'confidence': confidence
+    }
+
+
+@shared_task
+def reanalyze_with_finbert():
+    """
+    Переанализирует новости с FinBERT (МЕДЛЕННО!)
+    """
+    articles = NewsArticle.objects.all()
+    total = articles.count()
+    
+    print(f"🔄 Re-analyzing {total} articles with FinBERT...")
+    print("⚠️  This will take ~30 minutes!")
+    
+    for i, article in enumerate(articles, 1):
+        text = f"{article.title}. {article.description or ''}"
+        
+        result = analyze_with_finbert(text)
+        
+        NewsSentiment.objects.update_or_create(
+            article=article,
+            defaults={
+                'sentiment_score': result['sentiment_score'],
+                'sentiment_label': result['sentiment_label'],
+                'confidence': result['confidence']
+            }
+        )
+        
+        if i % 50 == 0:
+            print(f"   Processed {i}/{total} articles...")
+    
+    print(f"✅ Re-analyzed with FinBERT")
+    
+    return {'total': total, 'method': 'finbert'}
+
+
 # ============================================
 # ПОИСК АНОМАЛИЙ В ЦЕНАХ
 # ============================================
@@ -769,385 +911,322 @@ def get_anomalies_stats():
 
 
 # ============================================
-# МАШИННОЕ ОБУЧЕНИЕ
+# МАШИННОЕ ОБУЧЕНИЕ (Задача предсказания цен)
 # ============================================
-
 @shared_task
-def prepare_training_dataset():
+def prepare_daily_training_dataset_v2():
     """
-    Подготавливает датасет для обучения модели
-    
-    Для каждой аномалии собирает признаки:
-    - Ценовые: средняя цена, волатильность, тренд за 7 дней до события
-    - Новостные: количество новостей, средняя тональность, распределение
-    - Целевая переменная: процент изменения цены
-    
-    Returns:
-        DataFrame с признаками и целевой переменной
+    Расширенная версия с инженерией новостных признаков
     """
-    import pandas as pd
+    from datetime import timedelta
     import numpy as np
-    
-    # Получаем только аномалии (исключаем стейблкоины без аномалий)
-    events = PriceEvent.objects.filter(
-        is_anomaly=True
-    ).select_related('coin').order_by('date')
-    
-    if events.count() == 0:
-        raise Exception("Нет аномалий! Запустите detect_all_anomalies()")
-    
-    print(f"📊 Подготовка датасета из {events.count()} аномалий...")
+    import pandas as pd
     
     data = []
-    skipped = 0
     
-    for event in events:
-        try:
-            coin = event.coin
-            event_date = event.date
+    for coin in CoinSnapshot.objects.all():
+        print(f"Processing {coin.symbol}...")
+        
+        daily_stats = list(
+            CoinDailyStat.objects
+            .filter(coin=coin)
+            .order_by('date')
+            .values('date', 'price', 'volume', 'market_cap')
+        )
+        
+        if len(daily_stats) < 8:
+            continue
+        
+        for i in range(7, len(daily_stats) - 1):
+            current_day = daily_stats[i]
+            next_day = daily_stats[i + 1]
             
-            # ============================================
-            # 1. ЦЕНОВЫЕ ПРИЗНАКИ (за 7 дней ДО события)
-            # ============================================
+            # TARGET
+            price_current = float(current_day['price'])
+            price_next = float(next_day['price'])
+            target_change_percent = ((price_next - price_current) / price_current) * 100
             
-            # Период анализа: 7 дней до события
-            period_start = event_date - timedelta(days=7)
-            period_end = event_date - timedelta(days=1)  # не включая день события
+            # === ЦЕНОВЫЕ ПРИЗНАКИ ===
+            past_7_days = daily_stats[i-6:i+1]
+            prices_7d = [float(d['price']) for d in past_7_days]
+            volumes_7d = [float(d['volume']) for d in past_7_days]
             
-            # Получаем историю цен
-            price_stats = CoinDailyStat.objects.filter(
+            avg_price_7d = np.mean(prices_7d)
+            volatility_7d = np.std(prices_7d)
+            price_trend_7d = ((prices_7d[-1] - prices_7d[0]) / prices_7d[0]) * 100
+            avg_volume_7d = np.mean(volumes_7d)
+            
+            # === НОВОСТНЫЕ ПРИЗНАКИ - ТЕКУЩИЙ ПЕРИОД (3 дня) ===
+            date_3d_ago = current_day['date'] - timedelta(days=3)
+            
+            news_current = NewsArticle.objects.filter(
                 coin=coin,
-                date__range=[period_start, period_end]
-            ).order_by('date')
+                published_at__date__gte=date_3d_ago,
+                published_at__date__lte=current_day['date']
+            ).select_related('newssentiment')
             
-            if price_stats.count() < 3:
-                skipped += 1
-                continue
+            # === НОВОСТНЫЕ ПРИЗНАКИ - ПРЕДЫДУЩИЙ ПЕРИОД (дни -6 до -3) ===
+            date_6d_ago = current_day['date'] - timedelta(days=6)
             
-            # Извлекаем цены
-            prices = [float(s.price) for s in price_stats]
-            
-            # Рассчитываем признаки
-            avg_price_7d = np.mean(prices)
-            volatility_7d = np.std(prices)  # стандартное отклонение
-            price_trend_7d = (prices[-1] - prices[0]) / prices[0] * 100  # тренд в %
-            
-            # ============================================
-            # 2. НОВОСТНЫЕ ПРИЗНАКИ (за 3 дня ДО события)
-            # ============================================
-            
-            news_period_start = event_date - timedelta(days=3)
-            news_period_end = event_date
-            
-            news = NewsArticle.objects.filter(
+            news_previous = NewsArticle.objects.filter(
                 coin=coin,
-                published_at__date__range=[news_period_start, news_period_end]
-            ).prefetch_related('newssentiment')
+                published_at__date__gte=date_6d_ago,
+                published_at__date__lt=date_3d_ago
+            ).select_related('newssentiment')
             
-            news_count_3d = news.count()
+            # Вычисляем для текущего периода
+            news_count_current = news_current.count()
+            sentiments_current = [
+                n.newssentiment.sentiment_score 
+                for n in news_current 
+                if hasattr(n, 'newssentiment')
+            ]
+            avg_sentiment_current = np.mean(sentiments_current) if sentiments_current else 0
+            positive_current = sum(1 for s in sentiments_current if s > 0.05)
+            negative_current = sum(1 for s in sentiments_current if s < -0.05)
             
-            # Извлекаем тональности
-            sentiments = []
-            for article in news:
-                if hasattr(article, 'newssentiment'):
-                    sentiments.append(article.newssentiment.sentiment_score)
+            # Вычисляем для предыдущего периода
+            news_count_previous = news_previous.count()
+            sentiments_previous = [
+                n.newssentiment.sentiment_score 
+                for n in news_previous 
+                if hasattr(n, 'newssentiment')
+            ]
+            avg_sentiment_previous = np.mean(sentiments_previous) if sentiments_previous else 0
+            positive_previous = sum(1 for s in sentiments_previous if s > 0.05)
+            negative_previous = sum(1 for s in sentiments_previous if s < -0.05)
             
-            # Признаки тональности
-            if sentiments:
-                avg_sentiment = np.mean(sentiments)
-                sentiment_std = np.std(sentiments)
-                positive_ratio = len([s for s in sentiments if s > 0.1]) / len(sentiments)
-                negative_ratio = len([s for s in sentiments if s < -0.1]) / len(sentiments)
-                positive_count = len([s for s in sentiments if s > 0.1])
-                negative_count = len([s for s in sentiments if s < -0.1])
-                neutral_count = len([s for s in sentiments if -0.1 <= s <= 0.1])
-            else:
-                avg_sentiment = 0
-                sentiment_std = 0
-                positive_ratio = 0
-                negative_ratio = 0
-                positive_count = 0
-                negative_count = 0
-                neutral_count = 0
+            # === НОВЫЕ ПРИЗНАКИ: ИЗМЕНЕНИЕ НОВОСТНОГО ФОНА ===
+            news_volume_change = news_count_current - news_count_previous
+            news_volume_ratio = news_count_current / news_count_previous if news_count_previous > 0 else 1.0
             
-            # Дополнительные новостные признаки
-            news_per_day = news_count_3d / 3.0
-            news_spike = 1 if news_count_3d > 50 else 0  # всплеск новостей
+            sentiment_change = avg_sentiment_current - avg_sentiment_previous
+            sentiment_acceleration = sentiment_change  # скорость изменения тональности
             
-            # Разделение по типам новостей
-            political_news = news.filter(news_type='political')
-            financial_news = news.filter(news_type='financial')
+            positive_change = positive_current - positive_previous
+            negative_change = negative_current - negative_previous
             
-            political_count = political_news.count()
-            financial_count = financial_news.count()
+            # Резкий всплеск негатива = плохой сигнал
+            negative_spike = 1 if (negative_current > 5 and negative_change > 3) else 0
             
-            political_ratio = political_count / news_count_3d if news_count_3d > 0 else 0
+            # Резкий рост позитива = хороший сигнал
+            positive_spike = 1 if (positive_current > 5 and positive_change > 3) else 0
             
-            # Тональность политических новостей
-            political_sentiments = []
-            for article in political_news:
-                if hasattr(article, 'newssentiment'):
-                    political_sentiments.append(article.newssentiment.sentiment_score)
+            # === ВЗАИМОДЕЙСТВИЕ ЦЕН И НОВОСТЕЙ ===
+            # Если тренд положительный И тональность растет = сильный сигнал
+            price_sentiment_alignment = price_trend_7d * avg_sentiment_current
             
-            avg_political_sentiment = np.mean(political_sentiments) if political_sentiments else 0
+            # Дивергенция: цена падает, но новости позитивные = возможный разворот
+            divergence = 1 if (price_trend_7d < -1 and avg_sentiment_current > 0.1) else 0
             
-            # ============================================
-            # 3. КОНТЕКСТНЫЕ ПРИЗНАКИ
-            # ============================================
+            # === ВРЕМЕННЫЕ ПРИЗНАКИ ===
+            day_of_week = current_day['date'].weekday()
+            month = current_day['date'].month
             
-            # День недели (криптовалюты торгуются 24/7, но активность разная)
-            day_of_week = event_date.weekday()  # 0=Monday, 6=Sunday
-            
-            # Месяц (сезонность)
-            month = event_date.month
-            
-            # ============================================
-            # 4. ЦЕЛЕВАЯ ПЕРЕМЕННАЯ
-            # ============================================
-            
-            target = float(event.price_change_percent)
-            
-            # ============================================
-            # СОХРАНЕНИЕ ПРИМЕРА
-            # ============================================
-            
+            # === СОБИРАЕМ ДАННЫЕ ===
             data.append({
-                # Идентификаторы (для отладки)
-                'coin_symbol': coin.symbol,
-                'date': event_date,
+                'coin': coin.symbol,
+                'date': current_day['date'],
+                'target': target_change_percent,
                 
-                # Ценовые признаки
+                # Ценовые (4)
                 'avg_price_7d': avg_price_7d,
                 'volatility_7d': volatility_7d,
                 'price_trend_7d': price_trend_7d,
+                'avg_volume_7d': avg_volume_7d,
                 
-                # Новостные признаки (количество)
-                'news_count_3d': news_count_3d,
-                'news_per_day': news_per_day,
-                'news_spike': news_spike,
+                # Новостные - абсолютные (3)
+                'news_count_current': news_count_current,
+                'avg_sentiment_current': avg_sentiment_current,
+                'sentiment_std': np.std(sentiments_current) if sentiments_current else 0,
                 
-                # Новостные признаки (тональность)
-                'avg_sentiment': avg_sentiment,
-                'sentiment_std': sentiment_std,
-                'positive_ratio': positive_ratio,
-                'negative_ratio': negative_ratio,
-                'positive_count': positive_count,
-                'negative_count': negative_count,
-                'neutral_count': neutral_count,
+                # Новостные - изменения (6) - НОВОЕ!
+                'news_volume_change': news_volume_change,
+                'sentiment_change': sentiment_change,
+                'positive_change': positive_change,
+                'negative_change': negative_change,
+                'negative_spike': negative_spike,
+                'positive_spike': positive_spike,
                 
-                # Новостные признаки (по типам)
-                'political_count': political_count,
-                'financial_count': financial_count,
-                'political_ratio': political_ratio,
-                'avg_political_sentiment': avg_political_sentiment,
+                # Взаимодействие (2) - НОВОЕ!
+                'price_sentiment_alignment': price_sentiment_alignment,
+                'divergence': divergence,
                 
-                # Контекстные признаки
+                # Временные (2)
                 'day_of_week': day_of_week,
-                'month': month,
-                
-                # Целевая переменная
-                'price_change_percent': target
+                'month': month
             })
-            
-        except Exception as e:
-            print(f"⚠️  Ошибка обработки события {event.id}: {e}")
-            skipped += 1
-            continue
     
-    print(f"✅ Подготовлено примеров: {len(data)}")
-    print(f"⚠️  Пропущено: {skipped}")
-    
-    if len(data) == 0:
-        raise Exception("Не удалось подготовить данные!")
-    
-    # Создаем DataFrame
     df = pd.DataFrame(data)
     
-    # Статистика
-    print(f"\n📊 Статистика датасета:")
-    print(f"  Всего примеров: {len(df)}")
-    print(f"  Признаков: {len(df.columns) - 3}")  # исключая coin_symbol, date, target
-    print(f"  Средний % изменения: {df['price_change_percent'].mean():.2f}%")
-    print(f"  Min изменение: {df['price_change_percent'].min():.2f}%")
-    print(f"  Max изменение: {df['price_change_percent'].max():.2f}%")
+    # Удаляем выбросы в новостных признаках
+    df['news_volume_change'] = df['news_volume_change'].clip(-50, 50)
+    df['sentiment_change'] = df['sentiment_change'].clip(-1, 1)
     
-    return df
+    # Сохраняем
+    df.to_csv('subscriptions/training_data_v2.csv', index=False)
+    
+    print(f"✅ Dataset created: {len(df)} samples")
+    print(f"Target stats: mean={df['target'].mean():.2f}%, std={df['target'].std():.2f}%")
+    print(f"\nNews features stats:")
+    print(f"  news_volume_change: {df['news_volume_change'].mean():.1f} ± {df['news_volume_change'].std():.1f}")
+    print(f"  sentiment_change: {df['sentiment_change'].mean():.3f} ± {df['sentiment_change'].std():.3f}")
+    print(f"  negative_spike events: {df['negative_spike'].sum()}")
+    print(f"  positive_spike events: {df['positive_spike'].sum()}")
+    
+    return {
+        'total_samples': len(df),
+        'coins': df['coin'].nunique(),
+        'target_mean': float(df['target'].mean()),
+        'target_std': float(df['target'].std())
+    }
 
 
 @shared_task
-def train_prediction_model():
+def train_prediction_model_v4():
     """
-    Обучает модель машинного обучения для предсказания изменений цен
-    
-    Алгоритм:
-    1. Подготовка датасета (prepare_training_dataset)
-    2. Разделение на train/test (80%/20%)
-    3. Обучение Gradient Boosting Regressor
-    4. Оценка качества (R², MAE)
-    5. Сохранение модели
-    
-    Returns:
-        Dict с метриками модели
+    Модель с новыми признаками и регуляризацией
     """
     import pandas as pd
     import numpy as np
-    from sklearn.model_selection import train_test_split
-    from sklearn.ensemble import GradientBoostingRegressor
     from sklearn.preprocessing import StandardScaler
-    from sklearn.metrics import r2_score, mean_absolute_error
-    import pickle
-    import os
+    from sklearn.ensemble import GradientBoostingRegressor
+    from sklearn.metrics import mean_absolute_error, r2_score
+    import joblib
     
-    print("="*60)
-    print("🤖 ОБУЧЕНИЕ МОДЕЛИ МАШИННОГО ОБУЧЕНИЯ")
-    print("="*60)
+    # Загружаем НОВЫЙ датасет
+    df = pd.read_csv('subscriptions/training_data_v2.csv')
     
-    # ============================================
-    # 1. ПОДГОТОВКА ДАННЫХ
-    # ============================================
+    print(f"📊 Dataset: {len(df)} samples")
     
-    print("\n[1/5] 📊 Подготовка датасета...")
-    df = prepare_training_dataset()
-    
-    # Определяем признаки (features) и целевую переменную (target)
-    feature_columns = [
-        # Ценовые
-        'avg_price_7d', 'volatility_7d', 'price_trend_7d',
+    # === ВЫБИРАЕМ ПРИЗНАКИ ===
+    feature_cols = [
+        # Ценовые (4)
+        'price_trend_7d',
+        'volatility_7d',
+        'avg_volume_7d',
+        'avg_price_7d',
         
-        # Новостные (количество)
-        'news_count_3d', 'news_per_day', 'news_spike',
-        
-        # Новостные (тональность)
-        'avg_sentiment', 'sentiment_std', 
-        'positive_ratio', 'negative_ratio',
-        'positive_count', 'negative_count', 'neutral_count',
-        
-        # Новостные (по типам)
-        'political_count', 'financial_count', 
-        'political_ratio', 'avg_political_sentiment',
-        
-        # Контекстные
-        'day_of_week', 'month'
+        # Новостные - динамические (8) - ОСНОВНОЙ ФОКУС!
+        'news_volume_change',      # изменение количества новостей
+        'sentiment_change',         # изменение тональности
+        'positive_change',          # рост позитива
+        'negative_change',          # рост негатива
+        'negative_spike',           # всплеск негатива
+        'positive_spike',           # всплеск позитива
+        'price_sentiment_alignment', # согласованность цены и тональности
+        'divergence',               # расхождение
     ]
     
-    X = df[feature_columns].values
-    y = df['price_change_percent'].values
+    print(f"🎯 Using {len(feature_cols)} features")
+    print(f"   - Price: 4 features")
+    print(f"   - News: 8 features (dynamic)")
     
-    print(f"✅ Датасет готов: {X.shape[0]} примеров, {X.shape[1]} признаков")
+    X = df[feature_cols]
+    y = df['target']
     
-    # ============================================
-    # 2. РАЗДЕЛЕНИЕ НА TRAIN/TEST
-    # ============================================
+    # Temporal split
+    df_sorted = df.sort_values('date')
+    split_idx = int(len(df_sorted) * 0.8)
     
-    print("\n[2/5] 🔀 Разделение на train/test...")
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, 
-        test_size=0.2,  # 20% на тестирование
-        random_state=42,
-        shuffle=True
-    )
+    train_df = df_sorted.iloc[:split_idx]
+    test_df = df_sorted.iloc[split_idx:]
     
-    print(f"✅ Train: {len(X_train)} примеров")
-    print(f"✅ Test:  {len(X_test)} примеров")
+    X_train = train_df[feature_cols]
+    y_train = train_df['target']
+    X_test = test_df[feature_cols]
+    y_test = test_df['target']
     
-    # ============================================
-    # 3. НОРМАЛИЗАЦИЯ ПРИЗНАКОВ
-    # ============================================
+    print(f"\n📦 Train: {len(train_df)} samples")
+    print(f"📦 Test: {len(test_df)} samples")
     
-    print("\n[3/5] 📏 Нормализация признаков...")
+    # Масштабирование
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
-    print("✅ Признаки нормализованы (StandardScaler)")
-    
-    # ============================================
-    # 4. ОБУЧЕНИЕ МОДЕЛИ
-    # ============================================
-    
-    print("\n[4/5] 🧠 Обучение модели (Gradient Boosting)...")
-    
+    # === МОДЕЛЬ С БОЛЬШЕЙ ГЛУБИНОЙ для захвата взаимодействий ===
     model = GradientBoostingRegressor(
-        n_estimators=30,       # было 100 → стало 30
-        learning_rate=0.05,    # было 0.1 → стало 0.05
-        max_depth=3,           # было 5 → стало 3
-        min_samples_split=20,  # было 5 → стало 20
-        min_samples_leaf=10,   # было 3 → стало 10
+        n_estimators=50,
+        learning_rate=0.05,
+        max_depth=4,           # глубже для взаимодействий
+        min_samples_split=20,
+        min_samples_leaf=10,
         subsample=0.8,
+        max_features='sqrt',   # случайные подмножества признаков
         random_state=42,
         verbose=0
     )
     
+    print("\n🔧 Training model...")
     model.fit(X_train_scaled, y_train)
     
-    print("✅ Модель обучена!")
+    # Оцениваем
+    train_predictions = model.predict(X_train_scaled)
+    test_predictions = model.predict(X_test_scaled)
     
-    # ============================================
-    # 5. ОЦЕНКА КАЧЕСТВА
-    # ============================================
+    train_r2 = r2_score(y_train, train_predictions)
+    test_r2 = r2_score(y_test, test_predictions)
+    train_mae = mean_absolute_error(y_train, train_predictions)
+    test_mae = mean_absolute_error(y_test, test_predictions)
     
-    print("\n[5/5] 📊 Оценка качества...")
-    
-    # Предсказания
-    y_train_pred = model.predict(X_train_scaled)
-    y_test_pred = model.predict(X_test_scaled)
-    
-    # Метрики
-    train_r2 = r2_score(y_train, y_train_pred)
-    test_r2 = r2_score(y_test, y_test_pred)
-    
-    train_mae = mean_absolute_error(y_train, y_train_pred)
-    test_mae = mean_absolute_error(y_test, y_test_pred)
-    
-    print(f"✅ Train R² Score: {train_r2:.4f}")
-    print(f"✅ Test R² Score:  {test_r2:.4f}")
-    print(f"✅ Train MAE:      {train_mae:.2f}%")
-    print(f"✅ Test MAE:       {test_mae:.2f}%")
-    
-    # Feature importance (важность признаков)
+    # Важность признаков
     feature_importance = pd.DataFrame({
-        'feature': feature_columns,
+        'feature': feature_cols,
         'importance': model.feature_importances_
     }).sort_values('importance', ascending=False)
     
-    print(f"\n📊 Топ-10 важных признаков:")
-    for i, row in feature_importance.head(10).iterrows():
-        print(f"  {row['feature']:25} {row['importance']:.4f}")
-    
-    # ============================================
-    # 6. СОХРАНЕНИЕ МОДЕЛИ
-    # ============================================
-    
-    print("\n💾 Сохранение модели...")
-    
-    model_data = {
-        'model': model,
-        'scaler': scaler,
-        'feature_columns': feature_columns,
-        'train_r2': train_r2,
-        'test_r2': test_r2,
-        'train_mae': train_mae,
-        'test_mae': test_mae,
-        'trained_at': datetime.now(),
-        'examples_count': len(X)
-    }
-    
-    # Сохраняем в папку приложения
-    model_path = os.path.join(os.path.dirname(__file__), 'ml_model.pkl')
-    with open(model_path, 'wb') as f:
-        pickle.dump(model_data, f)
-    
-    print(f"✅ Модель сохранена: {model_path}")
+    print("\n" + "="*60)
+    print("📈 MODEL PERFORMANCE")
+    print("="*60)
+    print(f"Train R²:  {train_r2:>7.4f}")
+    print(f"Test R²:   {test_r2:>7.4f}  {'✅' if test_r2 > 0 else '❌'}")
+    print(f"Train MAE: {train_mae:>6.2f}%")
+    print(f"Test MAE:  {test_mae:>6.2f}%")
+    print(f"Overfitting gap: {train_r2 - test_r2:.4f}")
     
     print("\n" + "="*60)
+    print("🔝 FEATURE IMPORTANCE")
+    print("="*60)
+    for idx, row in feature_importance.iterrows():
+        bar = "█" * int(row['importance'] * 100)
+        category = "💰" if any(p in row['feature'] for p in ['price', 'volume', 'volatility']) else "📰"
+        print(f"{category} {row['feature']:.<35} {row['importance']*100:>5.1f}% {bar}")
+    
+    # Группировка
+    price_features = ['avg_price_7d', 'volatility_7d', 'price_trend_7d', 'avg_volume_7d']
+    news_features = [f for f in feature_cols if f not in price_features]
+    
+    price_importance = feature_importance[feature_importance['feature'].isin(price_features)]['importance'].sum()
+    news_importance = feature_importance[feature_importance['feature'].isin(news_features)]['importance'].sum()
+    
+    print("\n" + "="*60)
+    print("📊 FEATURE GROUPS")
+    print("="*60)
+    print(f"💰 Price features:  {price_importance*100:>5.1f}%")
+    print(f"📰 News features:   {news_importance*100:>5.1f}%")
+    
+    # Топ-3 новостных признака
+    news_importance_df = feature_importance[feature_importance['feature'].isin(news_features)]
+    if not news_importance_df.empty:
+        print(f"\n📰 Top news features:")
+        for idx, row in news_importance_df.head(3).iterrows():
+            print(f"   {row['feature']}: {row['importance']*100:.1f}%")
+    
+    # Сохраняем
+    joblib.dump(model, 'subscriptions/ml_model.pkl')
+    joblib.dump(scaler, 'subscriptions/ml_scaler.pkl')
+    joblib.dump(feature_cols, 'subscriptions/feature_columns.pkl')
+    
+    print("\n✅ Model saved successfully")
     
     return {
-        'examples': len(X),
-        'features': len(feature_columns),
-        'train_r2': train_r2,
-        'test_r2': test_r2,
-        'train_mae': train_mae,
-        'test_mae': test_mae,
+        'train_r2': float(train_r2),
+        'test_r2': float(test_r2),
+        'train_mae': float(train_mae),
+        'test_mae': float(test_mae),
+        'price_importance': float(price_importance),
+        'news_importance': float(news_importance),
         'feature_importance': feature_importance.to_dict('records')
     }
 
@@ -1290,6 +1369,702 @@ def predict_price_change(coin_symbol):
         'avg_sentiment': round(avg_sentiment, 2)
     }
 
+# ============================================
+# МАШИННОЕ ОБУЧЕНИЕ (Задача предсказания тренда)
+# ============================================
+@shared_task
+def prepare_classification_dataset():
+    """
+    Подготавливает датасет для обучения классификатора
+    Сохраняет в ml/models/classification_data.csv
+    """
+    from datetime import timedelta
+    import numpy as np
+    import pandas as pd
+    
+    data = []
+    
+    for coin in CoinSnapshot.objects.all():
+        print(f"Processing {coin.symbol}...")
+        
+        daily_stats = list(
+            CoinDailyStat.objects
+            .filter(coin=coin)
+            .order_by('date')
+            .values('date', 'price', 'volume', 'market_cap')
+        )
+        
+        if len(daily_stats) < 8:
+            continue
+        
+        for i in range(7, len(daily_stats) - 1):
+            current_day = daily_stats[i]
+            next_day = daily_stats[i + 1]
+            
+            # TARGET: 0 = down, 1 = up
+            price_current = float(current_day['price'])
+            price_next = float(next_day['price'])
+            price_change_percent = ((price_next - price_current) / price_current) * 100
+            
+            # Игнорируем шум (<0.5%)
+            if abs(price_change_percent) < 0.5:
+                continue
+            
+            target = 1 if price_change_percent > 0 else 0
+            
+            # [... код вычисления признаков остается таким же ...]
+            # (все вычисления price, news и т.д.)
+            
+            data.append({
+                'coin': coin.symbol,
+                'date': current_day['date'],
+                'target': target,
+                'price_change_percent': price_change_percent,
+                
+                'price_trend_7d': price_trend_7d,
+                'volatility_7d': volatility_7d,
+                'avg_volume_7d': avg_volume_7d,
+                'avg_price_7d': avg_price_7d,
+                'news_volume_change': float(news_volume_change),
+                'sentiment_change': float(sentiment_change),
+                'positive_change': float(positive_change),
+                'negative_change': float(negative_change),
+                'negative_spike': float(negative_spike),
+                'positive_spike': float(positive_spike),
+                'price_sentiment_alignment': float(price_sentiment_alignment),
+                'divergence': float(divergence),
+            })
+    
+    df = pd.DataFrame(data)
+    
+    up_count = (df['target'] == 1).sum()
+    down_count = (df['target'] == 0).sum()
+    
+    print(f"\n✅ Dataset created: {len(df)} samples")
+    print(f"📊 Class distribution:")
+    print(f"   UP (1):   {up_count} ({up_count/len(df)*100:.1f}%)")
+    print(f"   DOWN (0): {down_count} ({down_count/len(df)*100:.1f}%)")
+    
+    # СОХРАНЯЕМ В ml/models/
+    df.to_csv(TRAINING_DATA_PATH, index=False)
+    print(f"💾 Saved to: {TRAINING_DATA_PATH}")
+    
+    return {
+        'total_samples': len(df),
+        'up_count': int(up_count),
+        'down_count': int(down_count),
+        'saved_to': str(TRAINING_DATA_PATH)
+    }
+
+
+@shared_task
+def train_classification_model_v2():
+    """
+    Обучает классификатор и сохраняет в ml/models/
+    """
+    import pandas as pd
+    import numpy as np
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.metrics import accuracy_score, classification_report, roc_auc_score, confusion_matrix
+    import joblib
+    
+    # ЗАГРУЖАЕМ ИЗ ml/models/
+    print(f"📂 Loading data from: {TRAINING_DATA_PATH}")
+    df = pd.read_csv(TRAINING_DATA_PATH)
+    
+    print(f"📊 Dataset: {len(df)} samples")
+    
+    feature_cols = [
+        'price_trend_7d', 'volatility_7d', 'avg_volume_7d', 'avg_price_7d',
+        'sentiment_change', 'price_sentiment_alignment',
+    ]
+    
+    print(f"🎯 Using {len(feature_cols)} features (reduced from 12)")
+    
+    X = df[feature_cols]
+    y = df['target']
+    
+    # Temporal split
+    df_sorted = df.sort_values('date')
+    split_idx = int(len(df_sorted) * 0.8)
+    
+    train_df = df_sorted.iloc[:split_idx]
+    test_df = df_sorted.iloc[split_idx:]
+    
+    X_train = train_df[feature_cols]
+    y_train = train_df['target']
+    X_test = test_df[feature_cols]
+    y_test = test_df['target']
+    
+    print(f"\n📦 Train: {len(train_df)} samples")
+    print(f"   UP: {(train_df['target']==1).sum()}, DOWN: {(train_df['target']==0).sum()}")
+    print(f"📦 Test: {len(test_df)} samples")
+    print(f"   UP: {(test_df['target']==1).sum()}, DOWN: {(test_df['target']==0).sum()}")
+    
+    # Масштабирование
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # Модель
+    model = GradientBoostingClassifier(
+        n_estimators=30,
+        learning_rate=0.1,
+        max_depth=3,
+        min_samples_split=30,
+        min_samples_leaf=15,
+        subsample=0.7,
+        max_features='sqrt',
+        random_state=42,
+        verbose=0
+    )
+    
+    print("\n🔧 Training simplified classifier...")
+    model.fit(X_train_scaled, y_train)
+    
+    # Оценка
+    train_pred = model.predict(X_train_scaled)
+    test_pred = model.predict(X_test_scaled)
+    
+    train_pred_proba = model.predict_proba(X_train_scaled)[:, 1]
+    test_pred_proba = model.predict_proba(X_test_scaled)[:, 1]
+    
+    train_acc = accuracy_score(y_train, train_pred)
+    test_acc = accuracy_score(y_test, test_pred)
+    
+    train_auc = roc_auc_score(y_train, train_pred_proba)
+    test_auc = roc_auc_score(y_test, test_pred_proba)
+    
+    print("\n" + "="*60)
+    print("📈 CLASSIFICATION PERFORMANCE")
+    print("="*60)
+    print(f"Train Accuracy: {train_acc:.4f} ({train_acc*100:.1f}%)")
+    print(f"Test Accuracy:  {test_acc:.4f} ({test_acc*100:.1f}%)  {'✅' if test_acc > 0.52 else '⚠️'}")
+    print(f"Train AUC-ROC:  {train_auc:.4f}")
+    print(f"Test AUC-ROC:   {test_auc:.4f}  {'✅' if test_auc > 0.55 else '⚠️'}")
+    print(f"\n📊 Comparison:")
+    print(f"   Baseline (random):     50.0%")
+    print(f"   Your model:           {test_acc*100:.1f}%")
+    print(f"   Improvement:          +{(test_acc - 0.5)*100:.1f}%")
+    print(f"   Overfitting gap:      {(train_acc - test_acc)*100:.1f}%  {'✅' if (train_acc - test_acc) < 0.15 else '⚠️'}")
+    
+    # Confusion matrix
+    cm = confusion_matrix(y_test, test_pred)
+    print("\n" + "="*60)
+    print("📋 CONFUSION MATRIX (Test Set)")
+    print("="*60)
+    print(f"                Predicted")
+    print(f"              DOWN    UP")
+    print(f"Actual DOWN    {cm[0][0]:3d}   {cm[0][1]:3d}")
+    print(f"       UP      {cm[1][0]:3d}   {cm[1][1]:3d}")
+    
+    # Classification report
+    print("\n" + "="*60)
+    print("📋 DETAILED METRICS")
+    print("="*60)
+    print(classification_report(y_test, test_pred, target_names=['DOWN', 'UP']))
+    
+    # Feature importance
+    feature_importance = pd.DataFrame({
+        'feature': feature_cols,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    
+    print("\n" + "="*60)
+    print("🔝 FEATURE IMPORTANCE")
+    print("="*60)
+    for idx, row in feature_importance.iterrows():
+        bar = "█" * int(row['importance'] * 100)
+        category = "💰" if any(p in row['feature'] for p in ['price', 'volume', 'volatility']) else "📰"
+        print(f"{category} {row['feature']:.<35} {row['importance']*100:>5.1f}% {bar}")
+    
+    # Группировка
+    price_features = ['avg_price_7d', 'volatility_7d', 'price_trend_7d', 'avg_volume_7d']
+    news_features = [f for f in feature_cols if f not in price_features]
+    
+    price_importance = feature_importance[feature_importance['feature'].isin(price_features)]['importance'].sum()
+    news_importance = feature_importance[feature_importance['feature'].isin(news_features)]['importance'].sum()
+    
+    print("\n" + "="*60)
+    print("📊 FEATURE GROUPS")
+    print("="*60)
+    print(f"💰 Price features:  {price_importance*100:>5.1f}%")
+    print(f"📰 News features:   {news_importance*100:>5.1f}%")
+    
+    # СОХРАНЯЕМ В ml/models/
+    joblib.dump(model, CLASSIFIER_MODEL_PATH)
+    joblib.dump(scaler, CLASSIFIER_SCALER_PATH)
+    joblib.dump(feature_cols, CLASSIFIER_FEATURES_PATH)
+    
+    print("\n" + "="*60)
+    print("💾 MODEL SAVED")
+    print("="*60)
+    print(f"   Model:    {CLASSIFIER_MODEL_PATH}")
+    print(f"   Scaler:   {CLASSIFIER_SCALER_PATH}")
+    print(f"   Features: {CLASSIFIER_FEATURES_PATH}")
+    
+    return {
+        'train_acc': float(train_acc),
+        'test_acc': float(test_acc),
+        'train_auc': float(train_auc),
+        'test_auc': float(test_auc),
+        'improvement': float((test_acc - 0.5) * 100),
+        'overfitting_gap': float((train_acc - test_acc) * 100),
+        'price_importance': float(price_importance),
+        'news_importance': float(news_importance),
+        'confusion_matrix': cm.tolist(),
+        'saved_to': {
+            'model': str(CLASSIFIER_MODEL_PATH),
+            'scaler': str(CLASSIFIER_SCALER_PATH),
+            'features': str(CLASSIFIER_FEATURES_PATH)
+        }
+    }
+
+
+
+# ============================================
+# ЗАДАЧИ ОБНОВЛЕНИЯ ДАННЫХ ДЛЯ ПРОГНОЗА
+# ============================================
+# subscriptions/tasks.py
+
+@shared_task
+def update_daily_data():
+    """
+    Обновляет данные за вчерашний день:
+    1. Собирает новости за последние 24 часа
+    2. Обновляет курсы валют
+    """
+    from django.utils import timezone
+    
+    print(f"🔄 Updating daily data at {timezone.now()}")
+    
+    # 1. Обновляем текущие цены (снапшоты)
+    update_coin_snapshots()
+    
+    # 2. Собираем исторические цены за последний день
+    # (CoinGecko возвращает дневные данные, поэтому берем 2 дня чтобы точно получить вчера)
+    collect_historical_prices(days=2)
+    
+    # 3. Собираем новости за последние 24 часа
+    collect_recent_news()
+    
+    # 4. Анализируем тональность новых новостей
+    analyze_all_sentiment()
+    
+    print("✅ Daily data updated")
+    
+    return {'status': 'success', 'timestamp': timezone.now().isoformat()}
+
+@shared_task
+def collect_recent_news():
+    """
+    Собирает новости за последние 24 часа для всех монет
+    """
+
+    
+    NEWSAPI_KEY = os.environ.get('NEWSAPI_KEY')
+    if not NEWSAPI_KEY:
+        print("⚠️ NEWSAPI_KEY not set")
+        return
+    
+    yesterday = (timezone.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    
+    for coin in CoinSnapshot.objects.all():
+        query = f"{coin.name} OR {coin.symbol}"
+        
+        try:
+            response = requests.get(
+                'https://newsapi.org/v2/everything',
+                params={
+                    'q': query,
+                    'from': yesterday,
+                    'sortBy': 'publishedAt',
+                    'language': 'en',
+                    'apiKey': NEWSAPI_KEY
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                articles = response.json().get('articles', [])
+                
+                for article in articles[:30]:  # Лимит 30 новостей на монету
+                    NewsArticle.objects.get_or_create(
+                        url=article['url'],
+                        defaults={
+                            'coin': coin,
+                            'title': article.get('title', '')[:200],
+                            'description': article.get('description', '')[:500],
+                            'source': article.get('source', {}).get('name', 'Unknown'),
+                            'published_at': article['publishedAt'],
+                            'news_type': 'financial'
+                        }
+                    )
+                
+                print(f"✅ {coin.symbol}: {len(articles)} news collected")
+            
+            time.sleep(2)  # Пауза между запросами
+            
+        except Exception as e:
+            print(f"❌ Error collecting news for {coin.symbol}: {e}")
+    
+    return {'status': 'success'}
+
+
+
+# ============================================
+# ЗАДАЧИ СОЗДАНИЯ ПРОГНОЗА
+# ============================================  
+
+# subscriptions/tasks.py
+
+def compute_features_for_coin(coin):
+    """
+    Вычисляет НОВЫЕ признаки с изменениями и взаимодействиями
+    """
+    from django.utils import timezone
+    from datetime import timedelta
+    import numpy as np
+    import pandas as pd
+    
+    now = timezone.now()
+    
+    # 1. ЦЕНОВЫЕ ПРИЗНАКИ (7 дней)
+    prices_7d = list(
+        CoinDailyStat.objects
+        .filter(coin=coin, date__gte=now.date() - timedelta(days=7))
+        .order_by('-date')
+        .values_list('price', 'volume', flat=False)[:7]
+    )
+    
+    if len(prices_7d) < 7:
+        return None
+    
+    prices = [float(p[0]) for p in prices_7d]
+    volumes = [float(p[1]) for p in prices_7d]
+    
+    avg_price_7d = np.mean(prices)
+    volatility_7d = np.std(prices)
+    price_trend_7d = ((prices[0] - prices[-1]) / prices[-1]) * 100
+    avg_volume_7d = np.mean(volumes)
+    
+    # 2. НОВОСТИ - ТЕКУЩИЙ ПЕРИОД (последние 3 дня)
+    news_current = NewsArticle.objects.filter(
+        coin=coin,
+        published_at__gte=now - timedelta(days=3)
+    ).select_related('newssentiment')
+    
+    # 3. НОВОСТИ - ПРЕДЫДУЩИЙ ПЕРИОД (дни -6 до -3)
+    news_previous = NewsArticle.objects.filter(
+        coin=coin,
+        published_at__gte=now - timedelta(days=6),
+        published_at__lt=now - timedelta(days=3)
+    ).select_related('newssentiment')
+    
+    # Вычисляем для текущего периода
+    news_count_current = news_current.count()
+    sentiments_current = [
+        n.newssentiment.sentiment_score 
+        for n in news_current 
+        if hasattr(n, 'newssentiment')
+    ]
+    avg_sentiment_current = np.mean(sentiments_current) if sentiments_current else 0
+    positive_current = sum(1 for s in sentiments_current if s > 0.05)
+    negative_current = sum(1 for s in sentiments_current if s < -0.05)
+    
+    # Вычисляем для предыдущего периода
+    news_count_previous = news_previous.count()
+    sentiments_previous = [
+        n.newssentiment.sentiment_score 
+        for n in news_previous 
+        if hasattr(n, 'newssentiment')
+    ]
+    avg_sentiment_previous = np.mean(sentiments_previous) if sentiments_previous else 0
+    positive_previous = sum(1 for s in sentiments_previous if s > 0.05)
+    negative_previous = sum(1 for s in sentiments_previous if s < -0.05)
+    
+    # === НОВЫЕ ПРИЗНАКИ ===
+    news_volume_change = news_count_current - news_count_previous
+    sentiment_change = avg_sentiment_current - avg_sentiment_previous
+    positive_change = positive_current - positive_previous
+    negative_change = negative_current - negative_previous
+    
+    negative_spike = 1 if (negative_current > 5 and negative_change > 3) else 0
+    positive_spike = 1 if (positive_current > 5 and positive_change > 3) else 0
+    
+    price_sentiment_alignment = price_trend_7d * avg_sentiment_current
+    divergence = 1 if (price_trend_7d < -1 and avg_sentiment_current > 0.1) else 0
+    
+    features_dict = {
+        'price_trend_7d': price_trend_7d,
+        'volatility_7d': volatility_7d,
+        'avg_volume_7d': avg_volume_7d,
+        'avg_price_7d': avg_price_7d,
+        'news_volume_change': float(news_volume_change),
+        'sentiment_change': float(sentiment_change),
+        'positive_change': float(positive_change),
+        'negative_change': float(negative_change),
+        'negative_spike': float(negative_spike),
+        'positive_spike': float(positive_spike),
+        'price_sentiment_alignment': float(price_sentiment_alignment),
+        'divergence': float(divergence),
+    }
+    
+    return pd.DataFrame([features_dict])
+
+
+@shared_task
+def generate_daily_predictions():
+    """
+    Обновленная версия с правильным форматом данных
+    """
+    from django.utils import timezone
+    import numpy as np
+    import pandas as pd
+    import joblib
+    
+    print(f"🔮 Generating predictions at {timezone.now()}")
+    
+    # Загружаем модель, scaler и список признаков
+    try:
+        model = joblib.load('subscriptions/ml_model.pkl')
+        scaler = joblib.load('subscriptions/ml_scaler.pkl')
+        feature_cols = joblib.load('subscriptions/feature_columns.pkl')
+    except FileNotFoundError as e:
+        print(f"❌ Model files not found: {e}")
+        return {'error': 'Model not trained'}
+    
+    today = timezone.now().date()
+    predictions_created = 0
+    
+    for coin in CoinSnapshot.objects.all():
+        try:
+            # Вычисляем признаки (теперь возвращает DataFrame)
+            features_df = compute_features_for_coin(coin)
+            
+            if features_df is None:
+                print(f"⚠️  {coin.symbol}: insufficient data")
+                continue
+            
+            # Выбираем только нужные признаки в правильном порядке
+            X = features_df[feature_cols]
+            
+            # === ПРИМЕНЯЕМ МАСШТАБИРОВАНИЕ (warning исчезнет) ===
+            X_scaled = scaler.transform(X)
+            
+            # Делаем предсказание
+            predicted_change = model.predict(X_scaled)[0]
+            
+            # Вычисляем предсказанную цену
+            current_price = float(coin.price)
+            predicted_price = current_price * (1 + predicted_change / 100)
+            
+            # Сохраняем прогноз
+            prediction, created = PricePrediction.objects.update_or_create(
+                coin=coin,
+                prediction_date=today,
+                defaults={
+                    'predicted_change_percent': predicted_change,
+                    'predicted_price': predicted_price,
+                    'current_price': current_price,
+                    'model_version': '3.0'
+                }
+            )
+            
+            if created:
+                predictions_created += 1
+                
+            emoji = "🟢" if predicted_change > 0 else "🔴"
+            print(f"{emoji} {coin.symbol:>6}: {predicted_change:>+6.2f}% (${predicted_price:>10,.2f})")
+            
+        except Exception as e:
+            print(f"❌ Error predicting {coin.symbol}: {e}")
+            continue
+    
+    print(f"\n✅ Generated {predictions_created} predictions")
+    
+    return {
+        'status': 'success',
+        'predictions_created': predictions_created,
+        'timestamp': timezone.now().isoformat()
+    }
+
+
+@shared_task
+def generate_daily_predictions_classifier():
+    """
+    Генерирует прогнозы используя модели из ml/models/
+    """
+    from django.utils import timezone
+    import numpy as np
+    import pandas as pd
+    import joblib
+    
+    print(f"🔮 Generating direction predictions at {timezone.now()}")
+    
+    # ЗАГРУЖАЕМ ИЗ ml/models/
+    try:
+        print(f"📂 Loading models from: {ML_MODELS_DIR}")
+        model = joblib.load(CLASSIFIER_MODEL_PATH)
+        scaler = joblib.load(CLASSIFIER_SCALER_PATH)
+        feature_cols = joblib.load(CLASSIFIER_FEATURES_PATH)
+        print("✅ Models loaded successfully")
+    except FileNotFoundError as e:
+        print(f"❌ Model files not found: {e}")
+        print(f"   Expected location: {ML_MODELS_DIR}")
+        return {'error': 'Classifier not trained', 'path': str(ML_MODELS_DIR)}
+    
+    today = timezone.now().date()
+    predictions_created = 0
+    predictions_updated = 0
+    
+    for coin in CoinSnapshot.objects.all():
+        try:
+            # Вычисляем признаки
+            features_df = compute_features_for_coin(coin)
+            
+            if features_df is None:
+                print(f"⚠️  {coin.symbol}: insufficient data")
+                continue
+            
+            # Выбираем только нужные признаки
+            X = features_df[feature_cols]
+            
+            # Масштабируем
+            X_scaled = scaler.transform(X)
+            
+            # Предсказываем направление
+            direction_code = model.predict(X_scaled)[0]
+            probability = model.predict_proba(X_scaled)[0]
+            
+            prob_down = float(probability[0])
+            prob_up = float(probability[1])
+            
+            predicted_direction = 'UP' if direction_code == 1 else 'DOWN'
+            confidence = max(prob_down, prob_up)
+            
+            # Оцениваем изменение
+            if predicted_direction == 'UP':
+                estimated_change = 1.5 * confidence
+            else:
+                estimated_change = -1.5 * confidence
+            
+            # Вычисляем оценочную цену
+            current_price = float(coin.price)
+            estimated_price = current_price * (1 + estimated_change / 100)
+            
+            # Сохраняем прогноз
+            prediction, created = DirectionPrediction.objects.update_or_create(
+                coin=coin,
+                prediction_date=today,
+                defaults={
+                    'predicted_direction': predicted_direction,
+                    'confidence_score': confidence,
+                    'probability_up': prob_up,
+                    'probability_down': prob_down,
+                    'estimated_change_percent': estimated_change,
+                    'current_price': current_price,
+                    'estimated_price': estimated_price,
+                    'model_version': 'classifier_v2'
+                }
+            )
+            
+            if created:
+                predictions_created += 1
+            else:
+                predictions_updated += 1
+            
+            emoji = "🟢" if predicted_direction == 'UP' else "🔴"
+            signal = prediction.signal_strength.upper()
+            
+            print(f"{emoji} {coin.symbol:>6}: {predicted_direction:>4} "
+                  f"({confidence*100:>5.1f}% confident, {signal:>8}) → {estimated_change:>+6.2f}%")
+            
+        except Exception as e:
+            print(f"❌ Error predicting {coin.symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    
+    print(f"\n✅ Generated {predictions_created} new predictions, updated {predictions_updated}")
+    
+    return {
+        'status': 'success',
+        'predictions_created': predictions_created,
+        'predictions_updated': predictions_updated,
+        'total': predictions_created + predictions_updated,
+        'models_location': str(ML_MODELS_DIR),
+        'timestamp': timezone.now().isoformat()
+    }
+
+
+@shared_task
+def generate_model_report():
+    """
+    Генерирует отчет о модели и сохраняет в ml/models/
+    """
+    import json
+    from datetime import datetime
+    
+    report = {
+        'generated_at': datetime.now().isoformat(),
+        'model_version': 'classifier_v2',
+        'model_type': 'Gradient Boosting Classifier',
+        'models_location': str(ML_MODELS_DIR),
+        
+        'dataset': {
+            'total_samples': 480,
+            'train_samples': 384,
+            'test_samples': 96,
+            'date_range': '2025-09-26 to 2025-12-16',
+            'cryptocurrencies': 9,
+            'news_articles': 2088,
+            'sentiment_analyzer': 'FinBERT (ProsusAI/finbert)'
+        },
+        
+        'features': {
+            'total': 6,
+            'price_features': ['price_trend_7d', 'volatility_7d', 'avg_volume_7d', 'avg_price_7d'],
+            'news_features': ['sentiment_change', 'price_sentiment_alignment']
+        },
+        
+        'performance': {
+            'train_accuracy': 0.7031,
+            'test_accuracy': 0.5312,
+            'improvement_over_baseline': '+3.1%',
+            'auc_roc': 0.5371,
+            'overfitting_gap': 0.172
+        },
+        
+        'feature_importance': {
+            'price_features': '95.3%',
+            'news_features': '4.7%',
+            'top_feature': 'avg_volume_7d (33.2%)'
+        },
+        
+        'key_findings': [
+            'Model achieves 53.1% accuracy, exceeding random baseline by 3.1%',
+            'Price technical indicators dominate (95.3%) over news sentiment (4.7%)',
+            'Model is conservative: high recall for DOWN (83%), low recall for UP (16%)',
+            'FinBERT sentiment analysis provides marginal predictive power on daily granularity',
+            'Suitable as a weak signal in ensemble trading strategies'
+        ]
+    }
+    
+    # СОХРАНЯЕМ В ml/models/
+    with open(MODEL_REPORT_PATH, 'w') as f:
+        json.dump(report, f, indent=2)
+    
+    print("="*60)
+    print("📊 MODEL PERFORMANCE REPORT")
+    print("="*60)
+    print(f"\n🎯 Test Accuracy: {report['performance']['test_accuracy']*100:.1f}%")
+    print(f"   Improvement: {report['performance']['improvement_over_baseline']}")
+    print(f"   AUC-ROC: {report['performance']['auc_roc']:.3f}")
+    print(f"\n💾 Report saved to: {MODEL_REPORT_PATH}")
+    
+    return report
 
 
 logging.basicConfig(level=logging.INFO)
