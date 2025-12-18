@@ -4,14 +4,20 @@ from django.contrib import admin
 from django.utils.html import format_html
 from .models import (
     CoinSnapshot, CoinDailyStat, NewsArticle, 
-    NewsSentiment, PriceEvent, PricePrediction, DirectionPrediction
+    NewsSentiment, PriceEvent, PricePrediction, DirectionPrediction, BotUser
 )
+
+
+@admin.register(BotUser)
+class BotUserAdmin(admin.ModelAdmin):   
+    list_display = ['telegram_id']
 
 @admin.register(CoinSnapshot)
 class CoinSnapshotAdmin(admin.ModelAdmin):
     list_display = ['symbol', 'name', 'price', 'market_cap', 'updated_at']
     search_fields = ['symbol', 'name']
     ordering = ['-market_cap']
+
 
 
 @admin.register(CoinDailyStat)
