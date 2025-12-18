@@ -25,14 +25,12 @@ dispatcher = Dispatcher(storage=storage)
 async def set_bot_commands(bot: Bot):
     commands = [
         BotCommand(command="home", description="Домашняя страница"),
-        BotCommand(command="list", description="Список топ-10 монет"),
-        BotCommand(command="subscribe", description="Подписаться по поиску монеты"),
+        BotCommand(command="predictions", description="🔮 Прогнозы на сегодня"),  # НОВАЯ КОМАНДА
         BotCommand(command="subscriptions", description="Список монет, на которые вы подписаны"),
         BotCommand(command="delete", description="Удалить подписку"),
-        # BotCommand(command="faq", description="Часто задаваемые вопросы"),
     ]
     await bot.set_my_commands(commands)
-
+    
 # Регистрация роутеров
 for r in all_router:
     dispatcher.include_router(r)
