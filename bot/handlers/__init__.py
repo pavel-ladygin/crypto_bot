@@ -6,7 +6,8 @@ from bot.handlers import (
     dell,
     subscriptions,
     predictions,
-    faq
+    faq,
+    chart_vision,
 )
 
 all_router = [
@@ -15,5 +16,6 @@ all_router = [
     dell.router,
     subscriptions.router,
     predictions.router,
-    faq.router
+    faq.router,
+    chart_vision.router,
 ]

@@ -5,6 +5,9 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red)](https://pytorch.org)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
+Chart Vision documentation: [docs/chart_vision.md](docs/chart_vision.md)  
+Chart Vision smoke test: [docs/chart_vision_smoke_test.md](docs/chart_vision_smoke_test.md)
+
 > Полнофункциональная система анализа влияния криптоновостей на динамику цен криптовалют с использованием трансформер-моделей (FinBERT vs Custom DistilBERT).
 
 ## 📝 Описание проекта

@@ -1,20 +1,25 @@
 FROM python:3.11-slim
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_COMPILE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Устанавливаем системные зависимости для PostgreSQL
+# Устанавливаем минимальные системные зависимости для headless matplotlib/Pillow
 RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    build-essential \
-    libpq-dev \
+    --no-install-recommends \
+    fontconfig \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Копируем зависимости
-COPY requirements.txt .
+COPY requirements-docker.txt requirements-torch-cpu.txt ./
 
 # Устанавливаем Python зависимости
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-compile -r requirements-docker.txt
+RUN pip install --no-cache-dir --no-compile -r requirements-torch-cpu.txt
 
 # Копируем весь проект
 COPY . .

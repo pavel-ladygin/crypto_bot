@@ -1,0 +1,1 @@
+"""Chart vision Django app."""

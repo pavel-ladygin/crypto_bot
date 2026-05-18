@@ -6,6 +6,33 @@ __pycache__/
 *.py[cod]
 celerybeat-schedule.db
 db.sqlite3
+
+# Chart Vision generated artifacts
+ml/datasets/chart_vision/all/
+ml/datasets/chart_vision/train/
+ml/datasets/chart_vision/val/
+ml/datasets/chart_vision/test/
+ml/datasets/chart_vision/*.csv
+!ml/datasets/chart_vision/.gitkeep
+
+ml/datasets/chart_vision_real_screenshots/raw/*
+!ml/datasets/chart_vision_real_screenshots/raw/.gitkeep
+ml/datasets/chart_vision_real_screenshots/predictions/*.csv
+!ml/datasets/chart_vision_real_screenshots/predictions/.gitkeep
+!ml/datasets/chart_vision_real_screenshots/metadata.csv
+
+ml/models/chart_vision/*.pt
+ml/models/chart_vision/*.pth
+ml/models/chart_vision/*.png
+ml/models/chart_vision/*.json
+!ml/models/chart_vision/.gitkeep
+
+media/chart_vision/generated/
+media/chart_vision/*.png
+media/chart_vision/*.jpg
+media/chart_vision/*.jpeg
+media/chart_vision/*.webp
+!media/chart_vision/.gitkeep
 dump.rdb
 
 # Файлы среды
